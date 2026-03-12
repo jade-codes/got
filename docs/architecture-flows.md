@@ -1,0 +1,438 @@
+# Data Flow Architecture
+
+End-to-end data flow through an agent's internal pipelines and the
+agent-to-agent attestation exchange. Follows the plan's pipeline:
+**deterministic geometry → signed attestation → independent
+reproducibility → causal proof → agent exchange**.
+
+All flows reflect the security-hardened codebase (255 tests passing).
+
+---
+
+## Agent-Internal Pipeline
+
+```
+  EXTRACTION                       BINARY FILES
+  (Python scripts,                 (consumed by Layer 0)
+  step 7 of 12)
+  =============                    ==============
+
+  Agent's own model                .gotact (GOTA magic)
+  (HuggingFace or                   layer x pos x d f32 LE
+   direct weights)                       |
+       |                           .gotue (GOTU magic)
+       +-- Tokenizer                V x d f32 LE
+       |       |                         |
+       v       v                         |
+  Forward Pass + Hooks             .labels
+       |                             0/1 per line
+       |   Unembedding extract           |
+       |       |                         |
+       v       v                         |
+   .gotact   .gotue                      |
+       |       |                         |
+       +---+---+                         |
+           |                             |
+           v                             v
+  =====================================================
+   GEOMETRY & CHECKPOINT
+  =====================================================
+
+  Why: The Gram matrix Phi = U^T U defines the causal inner product.
+  All downstream measurement (probes, drift, causal checks) is
+  performed in *this* geometry, not in Euclidean space.
+
+   load_unembedding(.gotue)   --->  UnembeddingMatrix
+                                         |
+                                         v
+                              CausalGeometry::from_unembedding(U, eps)
+                                  Phi = U^T U  (+eps*I if rank-deficient)
+                                         |
+                             +-----------+-----------+
+                             |                       |
+                             v                       v
+                      geometry_hash()          save .gotgeo
+                      H(Phi) [u8;32]         (reference checkpoint)
+                             |                       |
+                             v                       |
+  =====================================================
+   PROBE TRAINING                                    |
+  =====================================================
+                                                     |
+  Why: Linear probes trained under the causal inner product
+  measure whether a direction in the residual stream causally
+  encodes a property. The plan calls this "the geometry side".
+                                                     |
+   load_activations(.gotact)  --->  Vec<LayerAct>    |
+                                         |           |
+                                         v           |
+                              Precompute Phi*h        |
+                              for all samples        |
+                                         |           |
+                    labels.txt ------->   |           |
+                                         v           |
+                              SGD loop (epochs x samples)
+                                logit = w^T(Phi*h) + b
+                                pred  = sigma(logit)
+                                error = pred - y
+                                w <- w - lr * error * Phi*h
+                                b <- b - lr * error
+                                         |
+                                         v
+                              ProbeVector { w, b, platt, thresh }
+                                         |
+                                         v
+                              ProbeSet { probes, layer,
+                                geometry_hash: H(Phi),
+                                max_drift: <policy> }
+                                         |
+                                         v
+                              probes.json (persisted)
+                                         |
+  =====================================================
+   SELF-ATTESTATION (v1, v2, or v3)      |
+  =====================================================
+                                         |
+  Why: The attestation is a signed, deterministic record of what
+  the probes measured. It is independently reproducible (Tier 3).
+  Schema versions add progressive guarantees:
+    v1 = frozen model (Tier 1: signature)
+    v2 = chained after model update (Tier 2: consistency + drift)
+    v3 = causal intervention proof (the plan's KEYSTONE)
+
+  Hardening (defence-in-depth):
+    S-7:  timestamp must be ≤ now + 300 s
+    S-13: model_id, corpus_version, probe_version ≤ 256 bytes
+    S-20: layer_readings ≤ 1024 layers, total readings ≤ 65536
+    S-21: model_hash is Option<[u8; 32]> (None if absent)
+                                         |
+   load_activations(.gotact) ----+       |
+   current CausalGeometry ----+  |       |
+                              |  |       |
+                              v  v       |
+                     CausalGeometry      |
+                              |          |
+        probes.json ----------+----------+
+                              |
+                              v
+   If model has updated (v2 chained):
+     load reference .gotgeo ----> Geometry_ref
+     drift = drift_from(current, ref)
+     if drift > max_drift: STOP (probes stale)
+     read_probe_checked(probe, set, h, current, ref)
+   Else (v1 frozen):
+     read_probe(probe, h, geometry)
+                              |
+                              v
+              For each probe in each layer:
+                raw  = inner_product(w, h) + bias
+                conf = sigma(platt_scale * raw + platt_shift)
+                flag = conf < threshold
+                              |
+                              v
+   Optional causal checks (v3):
+     For each probe:
+       causal_check(probe, h, geometry, delta, model_fn, threshold)
+         h+ = h + delta*w_c,   h- = h - delta*w_c
+         y+ = model(h+),   y- = model(h-)
+         delta_plus, delta_minus, consistency
+         -> CausalScore { ..., is_causal }
+                              |
+                              v
+        merkle_root() -----+  |  +------ sha256(act_bytes)
+        (weight shards)    |  |  |       (input hash)
+                           v  v  v
+              Fill GeometricAttestation struct
+              { schema_version: 1, 2, or 3,
+                model_hash: Option<[u8; 32]>,    ← S-21
+                parent_attestation_hash: None or H(prev),
+                geometry_hash: H(Phi),
+                geometry_drift: None or Some(drift),
+                causal_scores: [...],
+                intervention_delta: Some(delta),
+                causal_flag: Some(all_pass),
+                sequence_number,                  ← Phase 13
+                directional_drifts: [...],        ← Phase 13
+                probe_commitment: Some(H(...)),   ← Phase 13
+                readings, confidences, flags, ... }
+                              |
+                              v
+              assemble_and_sign(attestation, sk)
+                S-7 / S-13 / S-20 gates pass
+                serialise_for_signing() → canonical LE bytes
+                Ed25519 sign(bytes, agent's secret_key)
+                              |
+                              v
+              Signed GeometricAttestation
+              (held in memory / persisted / stored)
+
+
+  =====================================================
+   HARDWARE ENCLAVE PIPELINE (alternative to above)
+  =====================================================
+
+  Why: If the agent runs in a TEE (SGX, SEV, H100), the signing
+  key never leaves the enclave. This makes the attestation
+  tamper-evident even against the host OS.
+
+  NOTE: The current MockEnclave runs in the same address space as
+  the agent. Probes, signing key, and geometry are all accessible
+  to the host process. Real TEE integration (step 12 of the build
+  order) would enforce hardware isolation — the agent runtime could
+  not read the probes or signing key. Until then, the mock validates
+  the protocol flow but not the security boundary.
+
+   Hardware (GPU/DMA)          Enclave (TEE)
+        |                          |
+        |-- capture(layer, pos, values)
+        |   compute integrity_hash |
+        |   = SHA-256(layer | pos | values)
+        |                          |
+        |-- ActivationFrame ------>|
+        |                          |
+        |   receive_activations(): |
+        |     recompute hash       |
+        |     verify integrity     |
+        |     store frame          |
+        |                          |
+        |   run_causal_check():    |
+        |     for each probe:      |
+        |       causal_check(...)  |
+        |     -> Vec<CausalScore>  |
+        |                          |
+        |   attest_with_causal():  |
+        |     embed causal scores  |
+        |     before signing       |
+        |     -> signed attestation|
+        |     (key stays in enclave)
+        |                          |
+
+   enclave_pipeline() orchestrates the full flow:
+     capture -> receive -> causal -> attest_with_causal
+
+
+  =====================================================
+   ATTESTATION STORAGE
+  =====================================================
+
+  Why: Signed attestations are persisted in a content-addressed
+  store so that any party can later audit a model's full history
+  and verify chain integrity.
+
+   Signed attestation
+        |
+        v
+   AttestationStore::append(attestation, verifying_key)
+        |
+        +-- verify signature (Ed25519)
+        +-- compute StoreId = SHA-256(canonical bytes)
+        +-- persist (MemoryStore or FileStore)
+        |     FileStore: atomic write (temp + rename)
+        |     FileStore: hash-on-load integrity check
+        |
+        v
+   Queryable store:
+     store.chain(model_id)  -> ordered attestation list
+     store.query(filter)    -> filtered results
+     store.audit(model_id)  -> AuditReport {
+       chain_length, chain_valid,
+       drift_summary { max_drift, mean_drift },
+       causal_summary { pass/fail_count, mean_consistency },
+       signers, timestamps
+     }
+
+
+  =====================================================
+   AGENT-TO-AGENT EXCHANGE
+  =====================================================
+
+  Why: Two agents must verify each other's alignment properties
+  before cooperating. The exchange is symmetric — both sides
+  produce and verify attestations. This is the protocol's
+  ultimate output: a trust decision backed by deterministic
+  geometry, signed attestation, and (optionally) causal proof.
+
+  Security hardening in the exchange path:
+    S-8:  verify_chain accepts &[VerifyingKey] for key rotation
+    S-9:  envelope has verified flag + from_bytes_verified()
+    S-2:  TrustRegistry verified by SHA-256 on load()
+    N-1:  Frame::encode returns Result (payload size guard)
+
+              Agent A                          Agent B
+                |                                |
+                |   self-attest (pipeline above) |
+                v                                v
+         attest_A (signed)              attest_B (signed)
+         + chain [attest_0..A]          + chain [attest_0..B]
+                |                                |
+                v                                v
+         build_request(                 build_response(
+           nonce, id_B,                   nonce, id_A,
+           key_A, chain, current)         key_B, verdict,
+                |                         chain, current)
+                v                                v
+         ExchangeRequest {              ExchangeResponse {
+           agent_id: id_A,               agent_id: id_B,
+           envelope: signed,              envelope: signed,
+           chain: [...],                  verdict: Accepted/Rejected,
+           current: attest_A              chain: [...],
+         }                                current: attest_B
+                |                         }
+                +---------> exchange <-----------+
+                |          (channel)             |
+                v                                v
+         received: rsp                  received: req
+                |                                |
+                v                                v
+         validate_response(             validate_request(
+           rsp, id_A, nonce,              req, id_B, nonce,
+           registry)                      registry)
+                |                                |
+   Envelope verify:                 Envelope verify:
+     Ed25519 sig check                Ed25519 sig check
+     peer_agent_id match              peer_agent_id match
+     attestation_hash match           attestation_hash match
+     chain_root_hash match            chain_root_hash match
+     timestamp freshness              timestamp freshness
+     (S-9: verified flag set)         (S-9: verified flag set)
+                |                                |
+   Chain verify (if v2/v3):          Chain verify:
+     verify_chain(chain,               verify_chain(chain,
+       current, pks, max_drift)          current, pks, max_drift)
+       ↑ S-8: &[VerifyingKey]           ↑ S-8: &[VerifyingKey]
+     -> ChainVerdict {                 -> ChainVerdict {
+         length, max_drift }               length, max_drift }
+                |                                |
+                v                                v
+         (Verdict, reason)              (Verdict, reason)
+
+
+  =====================================================
+   VERIFICATION (receiving agent)
+  =====================================================
+
+  Why: Verification implements the plan's three trust tiers.
+  Tier 1 checks the signature. Tier 2 checks consistency
+  (coverage, confidence, drift). Tier 3 reproduces the full
+  pipeline on the same model + input and demands bitwise match.
+
+         Received attestation
+         Sender's public key (from TrustRegistry)
+           TrustRegistry loaded with S-2 SHA-256 integrity
+                              |
+                              v
+              For each link in chain (if v2/v3):
+                check parent_attestation_hash linkage
+                check geometry_drift <= accepted_max
+                check model_id consistency across chain
+                check signature against &[VerifyingKey] (S-8)
+                              |
+                              v
+              Check schema_version in {1, 2, 3}
+                              |
+                              v
+              serialise_for_signing(attestation)
+              (reject NaN/Inf, canonicalise -0.0)
+                              |
+                              v
+              Ed25519 verify(bytes, signature, sender_pk)
+                              |
+                    +---------+---------+
+                    |                   |
+                    v                   v
+                 VALID              INVALID
+              (cooperate)        (refuse peer)
+```
+
+---
+
+## Pipeline Details
+
+### 1. Extraction (Model Weights → Binary Files)
+
+The Python extraction script (~50 lines, step 7 of 12 in the build
+order) reads the unembedding matrix U and residual-stream activations
+h out of a HuggingFace model. This produces the .gotact and .gotue
+binary files that the rest of the pipeline consumes.
+
+**Architecture auto-detection**: GPT-2 (`transformer.h`), LLaMA/Mistral (`model.layers`), OPT (`model.decoder.layers`), GPTNeoX/Pythia (`gpt_neox.layers`).
+
+### 2. Geometry & Checkpoint (Unembedding → Φ → .gotgeo)
+
+Computes the Gram matrix Φ = UᵀU defining the causal inner product.
+The geometry hash H(Φ) is a deterministic fingerprint that binds probes
+to the specific model they were trained against.
+
+### 3. Probe Training (Activations + Geometry → ProbeSet)
+
+Trains linear probes via SGD under the causal inner product. The ProbeSet
+records which geometry it was trained against (`geometry_hash`) and a
+maximum drift threshold (`max_drift`).
+
+### 4. Self-Attestation (Probes + Activations → Signed Attestation)
+
+Three schema versions provide progressively stronger guarantees:
+- **v1** (frozen model, Tier 1): basic probe readings + Ed25519 signature
+- **v2** (after model update, Tier 2): chained to previous attestation, geometry drift
+- **v3** (with causal intervention, the KEYSTONE): proves probed directions are causally linked
+
+Defence-in-depth gates in `assemble_and_sign()`:
+- S-7: timestamp ≤ now + 300 s
+- S-13: string fields ≤ 256 bytes
+- S-20: ≤ 1 024 layers, ≤ 65 536 readings
+- S-21: `model_hash` is `Option<[u8; 32]>` (not a sentinel)
+
+### 5. Hardware Enclave Pipeline (Alternative Attestation Path)
+
+When running inside a TEE, the signing key never leaves the enclave.
+`enclave_pipeline()` orchestrates: capture → receive → causal_check → attest_with_causal.
+
+### 6. Peer Verification (Received Attestation + Trust → Decision)
+
+Implements the Verifier role across three trust tiers:
+- Envelope verification: Ed25519 sig, peer_agent_id, attestation_hash, chain_root_hash, timestamp
+- Chain verification: `verify_chain()` with `&[VerifyingKey]` (S-8 key rotation), drift bounds, model_id consistency
+- Trust registry: S-2 SHA-256 integrity, `expected_model_hash` binding, `max_attestation_age_secs`
+
+### 7. Attestation Storage & Audit
+
+Content-addressed storage (`StoreId` = SHA-256 of canonical bytes).
+`FileStore` uses atomic writes (temp + rename) and hash-on-load integrity.
+`AuditReport` provides chain validity, drift summary, causal summary, signer list.
+
+---
+
+## File Formats
+
+### .gotact (Activations)
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 4 | Magic: `GOTA` |
+| 4 | 2 | Version (u16 LE) |
+| 6 | 4+n | Model ID (u32 LE length + UTF-8) |
+| — | 1 | Precision tag (0=fp32, 1=fp16, 2=bf16, 3=int8) |
+| — | 4 | hidden_dim d (u32 LE) |
+| — | 4 | num_layers (u32 LE) |
+| — | 4 | num_positions (u32 LE) |
+| — | var | Per layer: layer_index(u32) + per position: pos(u32) + d × f32 LE |
+
+### .gotue (Unembedding)
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 4 | Magic: `GOTU` |
+| 4 | 2 | Version (u16 LE) |
+| 6 | 4 | vocab_size V (u32 LE) |
+| 10 | 4 | hidden_dim d (u32 LE) |
+| 14 | V×d×4 | Data: V × d f32 LE row-major |
+
+### .gotgeo (Geometry Checkpoint)
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 4 | Magic: `GOTG` |
+| 4 | 2 | Version (u16 LE) |
+| 6 | 4 | hidden_dim d (u32 LE) |
+| 10 | 32 | geometry_hash (SHA-256 of Φ data) |
+| 42 | d×d×4 | Data: d × d f32 LE row-major Gram matrix Φ |

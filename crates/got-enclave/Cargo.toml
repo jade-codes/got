@@ -1,0 +1,18 @@
+[package]
+name = "got-enclave"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+mock = []
+
+[dependencies]
+got-core = { path = "../got-core" }
+got-attest = { path = "../got-attest" }
+got-probe = { path = "../got-probe" }
+got-wire = { path = "../got-wire" }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+sha2 = "0.10"
+thiserror = "1"
+
+[dev-dependencies]

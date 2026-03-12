@@ -1,0 +1,148 @@
+# Protocol Architecture Diagram
+
+End-to-end architecture of the Geometry of Trust protocol, from activation extraction through agent-to-agent exchange.
+
+```mermaid
+graph TB
+    subgraph extraction["Phase 0 — Activation Extraction (Python)"]
+        MODEL["AI Model<br/>(HuggingFace / Weights)"]
+        TOKENIZER["Tokenizer"]
+        FWD["Forward Pass + Hooks"]
+        GOTACT[".gotact<br/>Layer × Pos × d (f32 LE)"]
+        GOTUE[".gotue<br/>V × d (f32 LE)<br/>Unembedding Matrix U"]
+        LABELS[".labels<br/>0/1 per line"]
+
+        MODEL --> FWD
+        TOKENIZER --> FWD
+        FWD --> GOTACT
+        FWD --> GOTUE
+    end
+
+    subgraph geometry["Phase 1 — Causal Geometry (got-core)"]
+        UNEMBED["load_unembedding(.gotue)"]
+        CAUSAL_GEOM["CausalGeometry::from_unembedding(U, ε)<br/>Φ = UᵀU + εI"]
+        GEOM_HASH["geometry_hash() → H(Φ) [u8;32]"]
+        GOTGEO[".gotgeo checkpoint"]
+
+        GOTUE --> UNEMBED --> CAUSAL_GEOM
+        CAUSAL_GEOM --> GEOM_HASH
+        CAUSAL_GEOM --> GOTGEO
+    end
+
+    subgraph probes["Phase 2 — Probe Training (got-probe)"]
+        LOAD_ACT["load_activations(.gotact)"]
+        GRAM["Precompute Φ·h for all samples"]
+        SGD["SGD Loop<br/>logit = wᵀ(Φh) + b<br/>pred = σ(logit)<br/>w ← w − lr·error·Φh"]
+        PLATT["Platt Calibration<br/>+ ECE Metric"]
+        PROBE_VEC["ProbeVector { w, b, platt, thresh }"]
+        PROBE_SET["ProbeSet { probes, layer,<br/>geometry_hash, max_drift }"]
+
+        GOTACT --> LOAD_ACT --> GRAM
+        LABELS --> SGD
+        CAUSAL_GEOM --> GRAM --> SGD
+        SGD --> PLATT --> PROBE_VEC --> PROBE_SET
+    end
+
+    subgraph attestation["Phase 3 — Self-Attestation (got-attest)"]
+        direction TB
+        READ_PROBE["read_probe(probe, h, geometry)<br/>raw = wᵀΦh + b<br/>conf = σ(platt_scale·raw + shift)<br/>flag = conf < threshold"]
+
+        V1["v1 — Frozen Model<br/>(Tier 1: Signature)"]
+        V2["v2 — Chained After Update<br/>(Tier 2: Consistency + Drift)"]
+        V3["v3 — Causal Intervention<br/>(Tier 3: Reproduction)"]
+
+        ASSEMBLE["assemble_and_sign(attest, sk)<br/>S-7: timestamp ≤ now+300s<br/>S-13: strings ≤ 256 bytes<br/>S-20: ≤1024 layers, ≤65536 readings"]
+        CANON["serialise_for_signing()<br/>Canonical LE bytes"]
+        SIGN["Ed25519 Sign"]
+        SIGNED_ATT["Signed GeometricAttestation"]
+
+        PROBE_SET --> READ_PROBE
+        READ_PROBE --> V1
+        READ_PROBE --> V2
+        READ_PROBE --> V3
+        V1 --> ASSEMBLE
+        V2 --> ASSEMBLE
+        V3 --> ASSEMBLE
+        ASSEMBLE --> CANON --> SIGN --> SIGNED_ATT
+    end
+
+    subgraph causal["Causal Intervention (v3 only)"]
+        PERTURB["Perturb activations<br/>ŵ_c = Φw / ‖Φw‖<br/>h⁺ = h + δ·ŵ_c<br/>h⁻ = h − δ·ŵ_c"]
+        MODEL_FN["model(h⁺), model(h⁻)"]
+        CAUSAL_SCORE["CausalScore {<br/>delta_plus, delta_minus,<br/>consistency, is_causal }"]
+
+        PERTURB --> MODEL_FN --> CAUSAL_SCORE
+        CAUSAL_SCORE --> V3
+    end
+
+    subgraph enclave["Phase 3 alt — Hardware Enclave (got-enclave)"]
+        DMA["HardwareCapture<br/>(GPU DMA / TEE copy-out)"]
+        ACT_FRAME["ActivationFrame<br/>SHA-256(layer ‖ pos ‖ values)"]
+        ENCLAVE_RX["receive_activations()<br/>recompute + verify integrity"]
+        ENCLAVE_CAUSAL["run_causal_check()"]
+        ENCLAVE_ATTEST["attest_with_causal()<br/>🔒 signing key never leaves enclave"]
+
+        DMA --> ACT_FRAME --> ENCLAVE_RX --> ENCLAVE_CAUSAL --> ENCLAVE_ATTEST
+        ENCLAVE_ATTEST --> SIGNED_ATT
+    end
+
+    subgraph store["Phase 4 — Attestation Storage (got-store)"]
+        STORE_APPEND["AttestationStore::append()<br/>verify sig → compute StoreId<br/>= SHA-256(canonical bytes)"]
+        MEM_STORE["MemoryStore (HashMap)"]
+        FILE_STORE["FileStore (JSON, atomic write)<br/>hash-on-load integrity"]
+        AUDIT["AuditReport {<br/>chain_valid, drift_summary,<br/>causal_summary, signers }"]
+
+        SIGNED_ATT --> STORE_APPEND
+        STORE_APPEND --> MEM_STORE
+        STORE_APPEND --> FILE_STORE
+        MEM_STORE --> AUDIT
+        FILE_STORE --> AUDIT
+    end
+
+    subgraph exchange["Phase 5 — Agent-to-Agent Exchange (got-wire)"]
+        direction TB
+        ALICE["Agent Alice<br/>Model A, KeyPair A"]
+        BOB["Agent Bob<br/>Model B, KeyPair B"]
+        REQ["build_request()<br/>ExchangeRequest {<br/>agent_id, envelope,<br/>chain, current_attest }"]
+        RSP["build_response()<br/>ExchangeResponse {<br/>agent_id, envelope,<br/>verdict, chain, current_attest }"]
+        FRAME["Frame::encode()<br/>magic: 0x474F5431<br/>N-1: payload ≤ 16 MiB"]
+
+        subgraph envelope["ExchangeEnvelope (200 bytes)"]
+            ENV_FIELDS["nonce [32B] ‖ peer_agent_id [32B]<br/>‖ attestation_hash [32B]<br/>‖ chain_root [32B] ‖ timestamp [8B]<br/>+ Ed25519 sig [64B]<br/>S-9: verified flag"]
+        end
+
+        VALIDATE_REQ["validate_request()<br/>Ed25519 sig ✓ | peer_id ✓<br/>attest_hash ✓ | chain_root ✓<br/>timestamp freshness ✓"]
+        VALIDATE_RSP["validate_response()"]
+
+        CHAIN_VERIFY["verify_chain(chain, current,<br/>&[VerifyingKey], max_drift)<br/>S-8: key rotation support<br/>→ ChainVerdict"]
+
+        REGISTRY["TrustRegistry (TOML)<br/>S-2: SHA-256 integrity on load<br/>AgentEntry { agent_id,<br/>expected_model_hash,<br/>max_drift, roles }<br/>max_attestation_age_secs"]
+
+        DECIDE{"Both Accepted?"}
+        COOPERATE["✅ Cooperate"]
+        REFUSE["❌ Refuse"]
+
+        ALICE --> REQ
+        REQ --> FRAME
+        FRAME --> VALIDATE_REQ
+        VALIDATE_REQ --> CHAIN_VERIFY
+        BOB --> RSP
+        RSP --> FRAME
+        VALIDATE_RSP --> CHAIN_VERIFY
+        REGISTRY --> VALIDATE_REQ
+        REGISTRY --> VALIDATE_RSP
+        CHAIN_VERIFY --> DECIDE
+        DECIDE -->|yes| COOPERATE
+        DECIDE -->|no| REFUSE
+    end
+
+    style extraction fill:#1a1a2e,stroke:#e94560,color:#fff
+    style geometry fill:#16213e,stroke:#0f3460,color:#fff
+    style probes fill:#1a1a2e,stroke:#e94560,color:#fff
+    style attestation fill:#16213e,stroke:#0f3460,color:#fff
+    style causal fill:#0f3460,stroke:#53a8b6,color:#fff
+    style enclave fill:#1a1a2e,stroke:#e94560,color:#fff
+    style store fill:#16213e,stroke:#0f3460,color:#fff
+    style exchange fill:#1a1a2e,stroke:#e94560,color:#fff
+    style envelope fill:#0f3460,stroke:#53a8b6,color:#fff
+```

@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/got-core",
+    "crates/got-probe",
+    "crates/got-attest",
+    "crates/got-cli",
+    "crates/got-wire",
+    "crates/got-enclave",
+    "crates/got-store",
+]
+resolver = "2"
+
+[package]
+name = "geometry-of-trust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+got-core = { path = "crates/got-core" }
+got-probe = { path = "crates/got-probe" }
+got-attest = { path = "crates/got-attest" }
+got-wire = { path = "crates/got-wire" }
+got-enclave = { path = "crates/got-enclave" }
+got-store = { path = "crates/got-store" }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+got-enclave = { path = "crates/got-enclave", features = ["mock"] }
+serde_json = "1"
