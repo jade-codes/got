@@ -156,6 +156,8 @@ header .subtitle { font-size: 13px; color: #8b949e; }
 .finding-badge.mild { background: rgba(210,153,34,0.15); color: #d29922; }
 .finding-badge.redundant { background: rgba(88,166,255,0.15); color: #58a6ff; }
 .finding-badge.new-badge { background: rgba(248,81,73,0.2); color: #f85149; margin-left: 6px; }
+.finding-badge.active-badge { background: rgba(240,136,62,0.2); color: #f0883e; margin-left: 6px; }
+.finding-card.is-active { opacity: 1; border-left-width: 4px; }
 .finding-metrics { font-size: 12px; color: #8b949e; margin-top: 4px; }
 
 /* Viz containers */
@@ -438,17 +440,36 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
         html += '</div>';
       }
 
-      // New contradiction alerts
-      if (turn.new_contradictions.length > 0) {
-        turn.new_contradictions.forEach(c => {
+      // Active contradiction alerts (contradictions involving this turn's values)
+      const turnContras = turn.turn_contradictions || [];
+      const newKeys = new Set((turn.new_contradictions || []).map(c => c.term_a + '|' + c.term_b));
+      if (turnContras.length > 0) {
+        turnContras.forEach(c => {
           const sev = c.severity >= 0.5 ? 'severe' : c.severity >= 0.2 ? 'moderate' : 'mild';
+          const isNew = newKeys.has(c.term_a + '|' + c.term_b);
           html += '<div class="contradiction-alert">';
           html += '<span class="alert-icon">\u26A0</span>';
-          html += '<strong>' + sev.toUpperCase() + ':</strong> ';
+          html += '<strong>' + sev.toUpperCase() + (isNew ? ' (new)' : '') + ':</strong> ';
           html += '"' + esc(c.term_a) + '" \u2194 "' + esc(c.term_b) + '" ';
           html += '(cos: ' + c.causal_cosine.toFixed(3) + ')';
           html += '</div>';
         });
+      }
+
+      // Message-level coherence indicator
+      if (turn.message_coherence < 0.9) {
+        const mcPct = (turn.message_coherence * 100).toFixed(0);
+        const mcCls = turn.message_coherence < 0.4 ? 'severe' : turn.message_coherence < 0.7 ? 'moderate' : 'mild';
+        html += '<div class="contradiction-alert">';
+        html += '<span class="alert-icon">\u{1F4CA}</span>';
+        html += '<strong class="' + mcCls + '">MSG COHERENCE: ' + mcPct + '%</strong>';
+        if (turn.message_contradictions && turn.message_contradictions.length > 0) {
+          const pairs = turn.message_contradictions.map(c =>
+            '\u201C' + esc(c.term_a) + '\u201D\u2194\u201C' + esc(c.term_b) + '\u201D'
+          ).join(', ');
+          html += ' \u2014 ' + pairs;
+        }
+        html += '</div>';
       }
 
       html += '</div>';
@@ -540,7 +561,9 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
     // Speaker metrics
     let metricsHtml = 'Coherence: ' + (a.final_coherence * 100).toFixed(0) + '% | ' +
       'Trust: ' + (a.final_trust * 100).toFixed(0) + '% | ' +
-      'Influence: ' + (a.influence_score * 100).toFixed(0) + '%';
+      'Influence: ' + (a.influence_score * 100).toFixed(0) + '%' +
+      ' | Msg Coherence: ' + ((a.mean_message_coherence || 1) * 100).toFixed(0) + '%' +
+      ' | Convergence: ' + ((a.final_convergence || 0) * 100).toFixed(0) + '%';
 
     if (analysis.speaker_summary) {
       analysis.speaker_summary.forEach(s => {
@@ -636,6 +659,17 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
       .attr('stroke', '#f0883e').attr('stroke-width', 1.5)
       .attr('stroke-dasharray', '6,3');
 
+    // Message coherence line (dotted, green)
+    const msgCohLine = d3.line()
+      .x((d, i) => x(i))
+      .y(d => y(d.message_coherence))
+      .curve(d3.curveMonotoneX);
+
+    g.append('path').datum(turns)
+      .attr('d', msgCohLine).attr('fill', 'none')
+      .attr('stroke', '#3fb950').attr('stroke-width', 1.5)
+      .attr('stroke-dasharray', '3,3');
+
     // Dots (coherence)
     g.selectAll('circle.dot')
       .data(turns)
@@ -727,16 +761,20 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
       return;
     }
     const newKeys = new Set(turn.new_contradictions.map(c => c.term_a + '|' + c.term_b));
+    const activeKeys = new Set((turn.turn_contradictions || []).map(c => c.term_a + '|' + c.term_b));
     const sorted = [...turn.all_contradictions].sort((a, b) => b.severity - a.severity);
     el.innerHTML = sorted.map(c => {
       const sev = c.severity >= 0.5 ? 'severe' : c.severity >= 0.2 ? 'moderate' : 'mild';
-      const isNew = newKeys.has(c.term_a + '|' + c.term_b);
-      return '<div class="finding-card ' + sev + (isNew ? ' is-new' : '') + '">' +
+      const key = c.term_a + '|' + c.term_b;
+      const isNew = newKeys.has(key);
+      const isActive = activeKeys.has(key);
+      return '<div class="finding-card ' + sev + (isNew ? ' is-new' : '') + (isActive ? ' is-active' : '') + '">' +
         '<div class="finding-header">' +
         '<span class="finding-terms">\u201C' + esc(c.term_a) + '\u201D \u2194 \u201C' + esc(c.term_b) + '\u201D</span>' +
         '<span>' +
         '<span class="finding-badge ' + sev + '">' + sev + '</span>' +
         (isNew ? '<span class="finding-badge new-badge">new</span>' : '') +
+        (isActive ? '<span class="finding-badge active-badge">active</span>' : '') +
         '</span></div>' +
         '<div class="finding-metrics">' +
         'cosine: ' + c.causal_cosine.toFixed(3) + ' &nbsp;|&nbsp; ' +

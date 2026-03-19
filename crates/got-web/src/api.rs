@@ -78,6 +78,10 @@ pub struct Assessment {
     pub final_coherence: f32,
     /// Final trust.
     pub final_trust: f32,
+    /// Mean message coherence across all turns.
+    pub mean_message_coherence: f32,
+    /// Final convergence between speakers' value profiles.
+    pub final_convergence: f32,
 }
 
 /// Analysis state after each message in the conversation.
@@ -93,13 +97,25 @@ pub struct TurnAnalysis {
     /// All values accumulated up to this point.
     pub cumulative_values: Vec<String>,
     pub coherence_score: f32,
+    /// Coherence of just THIS message's detected values (not cumulative).
+    /// Computed from the pairwise geometry of the 6 terms in this message.
+    /// Dynamic every turn — never saturates.
+    pub message_coherence: f32,
     /// Trust score ∈ [0, 1]. Combines coherence with drift rate.
     pub trust_score: f32,
-    /// Cosine between this message and the speaker's first message.
-    /// Tracks how much each speaker's semantic position is shifting.
+    /// Drift in value-activation profile from this speaker's first message.
+    /// 0 = identical value profile, 1 = orthogonal.
     pub speaker_drift: f32,
+    /// Cosine similarity between the two speakers' cumulative value profiles.
+    /// Rises as one speaker adopts the other's framing.
+    pub convergence: f32,
     /// Contradictions that are new at this turn.
     pub new_contradictions: Vec<Contradiction>,
+    /// Contradictions from all_contradictions where at least one term
+    /// was detected in THIS message. Surfaces ongoing tensions.
+    pub turn_contradictions: Vec<Contradiction>,
+    /// Contradictions within THIS message's detected values only.
+    pub message_contradictions: Vec<Contradiction>,
     /// All contradictions at this point.
     pub all_contradictions: Vec<Contradiction>,
     /// All redundancies at this point.
@@ -332,6 +348,30 @@ pub async fn analyse_conversation(
             }
         }
 
+        // Collect term names detected in this message (for filtering active contradictions)
+        let turn_term_set: HashSet<String> = detected.iter().map(|dv| dv.term.clone()).collect();
+
+        // Per-message coherence: analyse just this message's detected values.
+        // This is dynamic every turn (never saturates) because each message
+        // has its own set of 6 values.
+        let turn_terms: Vec<&str> = detected.iter().map(|dv| dv.term.as_str()).collect();
+        let (msg_coherence, msg_contradictions) = if turn_terms.len() >= 2 {
+            match got_incoherence::analyse_value_system(
+                &turn_terms,
+                state.embedding_source.as_ref(),
+                &state.geometry,
+                &config,
+            ) {
+                Ok(report) => (
+                    report.analysis.coherence_score,
+                    report.analysis.contradictions,
+                ),
+                Err(_) => (1.0, vec![]),
+            }
+        } else {
+            (1.0, vec![])
+        };
+
         // Need at least 2 values to run analysis
         if cumulative_values.len() < 2 {
             turns.push(TurnAnalysis {
@@ -342,9 +382,13 @@ pub async fn analyse_conversation(
                 values_introduced,
                 cumulative_values: cumulative_values.clone(),
                 coherence_score: 1.0,
+                message_coherence: msg_coherence,
                 trust_score: 0.0, // computed in post-pass
                 speaker_drift: 0.0, // computed in post-pass
+                convergence: 0.0, // computed in post-pass
                 new_contradictions: vec![],
+                turn_contradictions: vec![],
+                message_contradictions: msg_contradictions,
                 all_contradictions: vec![],
                 all_redundancies: vec![],
                 pairwise: vec![],
@@ -378,6 +422,19 @@ pub async fn analyse_conversation(
                     previous_contradiction_keys.insert(contradiction_key(c));
                 }
 
+                // Active contradictions: those where at least one term
+                // was detected in this message's values.
+                let turn_contradictions: Vec<Contradiction> = report
+                    .analysis
+                    .contradictions
+                    .iter()
+                    .filter(|c| {
+                        turn_term_set.contains(&c.term_a)
+                            || turn_term_set.contains(&c.term_b)
+                    })
+                    .cloned()
+                    .collect();
+
                 turns.push(TurnAnalysis {
                     turn: idx,
                     speaker: msg.speaker.clone(),
@@ -386,9 +443,13 @@ pub async fn analyse_conversation(
                     values_introduced,
                     cumulative_values: cumulative_values.clone(),
                     coherence_score: report.analysis.coherence_score,
+                    message_coherence: msg_coherence,
                     trust_score: 0.0, // computed in post-pass
                     speaker_drift: 0.0, // computed in post-pass
+                    convergence: 0.0, // computed in post-pass
                     new_contradictions,
+                    turn_contradictions,
+                    message_contradictions: msg_contradictions,
                     all_contradictions: report.analysis.contradictions,
                     all_redundancies: report.analysis.redundancies,
                     pairwise: report.analysis.pairwise,
@@ -405,9 +466,13 @@ pub async fn analyse_conversation(
                     values_introduced,
                     cumulative_values: cumulative_values.clone(),
                     coherence_score: 1.0,
+                    message_coherence: msg_coherence,
                     trust_score: 0.0, // computed in post-pass
                     speaker_drift: 0.0, // computed in post-pass
+                    convergence: 0.0, // computed in post-pass
                     new_contradictions: vec![],
+                    turn_contradictions: vec![],
+                    message_contradictions: msg_contradictions,
                     all_contradictions: vec![],
                     all_redundancies: vec![],
                     pairwise: vec![],
@@ -418,9 +483,10 @@ pub async fn analyse_conversation(
         }
     }
 
-    // Post-pass: compute trust_score and speaker_drift
+    // Post-pass: compute trust_score, speaker_drift, and convergence
     compute_trust_scores(&mut turns);
     compute_speaker_drift(&mut turns, &req.messages);
+    compute_convergence(&mut turns);
 
     // Build per-speaker summaries and overall assessment
     let speaker_summary = build_speaker_summaries(&turns);
@@ -453,6 +519,7 @@ fn compute_trust_scores(turns: &mut [TurnAnalysis]) {
     let mut drift_penalty: f32 = 0.0;
     let decay = 0.7; // drift memory: 70% carried forward each turn
     let drift_weight = 2.0; // amplify drops
+    let recovery_threshold = 0.7; // only allow penalty decay when coherence is healthy
 
     for i in 0..turns.len() {
         let coherence = turns[i].coherence_score;
@@ -463,14 +530,27 @@ fn compute_trust_scores(turns: &mut [TurnAnalysis]) {
             if delta < 0.0 {
                 // Coherence dropped — accumulate drift penalty
                 drift_penalty = (drift_penalty * decay) + (-delta * drift_weight);
-            } else {
-                // Coherence stable or improving — decay penalty
+            } else if coherence > recovery_threshold {
+                // Only allow recovery when coherence is actually healthy.
+                // If coherence is still low, trust should NOT silently recover.
                 drift_penalty *= decay;
             }
+            // else: coherence is low and not dropping further — penalty stays.
         }
 
+        // Floor: sustained low coherence maintains a minimum penalty
+        // so trust can't exceed coherence even if no new drops occur.
+        let coherence_floor = (1.0 - coherence) * 0.8;
+        drift_penalty = drift_penalty.max(coherence_floor);
+
         let stability = (1.0 - drift_penalty).clamp(0.0, 1.0);
-        turns[i].trust_score = (coherence * stability).clamp(0.0, 1.0);
+
+        // Trust combines cumulative coherence, stability, AND per-message coherence.
+        // message_coherence captures ongoing mixing of opposed values even after
+        // the cumulative set saturates.
+        let msg_coh = turns[i].message_coherence;
+        let blended_coherence = coherence.min(msg_coh);
+        turns[i].trust_score = (blended_coherence * stability).clamp(0.0, 1.0);
     }
 }
 
@@ -485,21 +565,106 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
 }
 
-/// Compute per-speaker semantic drift: cosine(first_msg, current_msg) for each speaker.
-fn compute_speaker_drift(turns: &mut [TurnAnalysis], messages: &[MessageInput]) {
-    // Track first message embedding per speaker
-    let mut first_embedding: HashMap<String, &[f32]> = HashMap::new();
+/// Compute per-speaker value-profile drift.
+///
+/// Instead of comparing raw embeddings (which all cluster together for same-topic
+/// messages), we compare each message's VALUE ACTIVATION PROFILE — the z-score
+/// vector over all detected terms. This captures stance shifts even when the
+/// topic stays the same.
+fn compute_speaker_drift(turns: &mut [TurnAnalysis], _messages: &[MessageInput]) {
+    // Collect all value terms seen in the conversation
+    let all_terms: Vec<String> = if let Some(last) = turns.last() {
+        last.cumulative_values.clone()
+    } else {
+        return;
+    };
+    if all_terms.is_empty() {
+        return;
+    }
 
-    for (i, msg) in messages.iter().enumerate() {
-        let speaker = &msg.speaker;
-        if !first_embedding.contains_key(speaker) {
-            first_embedding.insert(speaker.clone(), &msg.embedding);
+    // Build value profile vector for a turn: z-scores indexed by term position
+    let build_profile = |turn: &TurnAnalysis| -> Vec<f32> {
+        let mut profile = vec![0.0f32; all_terms.len()];
+        for dv in &turn.detected_values {
+            if let Some(idx) = all_terms.iter().position(|t| t == &dv.term) {
+                profile[idx] = dv.cos_phi;
+            }
         }
-        if let Some(first) = first_embedding.get(speaker) {
-            // drift = 1 - cosine(first, current). 0 = identical, 1 = orthogonal.
-            let cos = cosine_similarity(first, &msg.embedding);
-            turns[i].speaker_drift = 1.0 - cos;
+        profile
+    };
+
+    // Track first profile per speaker
+    let mut first_profile: HashMap<String, Vec<f32>> = HashMap::new();
+
+    for turn in turns.iter_mut() {
+        let profile = build_profile(turn);
+        let speaker = &turn.speaker;
+
+        if !first_profile.contains_key(speaker) {
+            first_profile.insert(speaker.clone(), profile.clone());
         }
+
+        if let Some(first) = first_profile.get(speaker) {
+            let cos = cosine_similarity(first, &profile);
+            turn.speaker_drift = (1.0 - cos).max(0.0);
+        }
+    }
+}
+
+/// Compute per-turn convergence between speakers' cumulative value profiles.
+///
+/// For each turn, maintains a running sum of z-scores per term per speaker.
+/// Convergence = cosine similarity between the two running profiles.
+/// Rises from ~0 (different priorities) toward 1 as one speaker adopts
+/// the other's value framing.
+fn compute_convergence(turns: &mut [TurnAnalysis]) {
+    // Collect all value terms from the final cumulative set.
+    let all_terms: Vec<String> = if let Some(last) = turns.last() {
+        last.cumulative_values.clone()
+    } else {
+        return;
+    };
+    if all_terms.is_empty() {
+        return;
+    }
+
+    // Identify speakers in order of appearance
+    let speakers: Vec<String> = {
+        let mut seen = Vec::new();
+        for t in turns.iter() {
+            if !seen.contains(&t.speaker) {
+                seen.push(t.speaker.clone());
+            }
+        }
+        seen
+    };
+    if speakers.len() < 2 {
+        return;
+    }
+
+    // Running sum of z-scores per speaker
+    let mut profiles: HashMap<String, Vec<f32>> = HashMap::new();
+    for s in &speakers {
+        profiles.insert(s.clone(), vec![0.0f32; all_terms.len()]);
+    }
+
+    for turn in turns.iter_mut() {
+        // Accumulate this turn's z-scores into the speaker's running profile
+        if let Some(profile) = profiles.get_mut(&turn.speaker) {
+            for dv in &turn.detected_values {
+                if let Some(idx) = all_terms.iter().position(|t| t == &dv.term) {
+                    profile[idx] += dv.cos_phi;
+                }
+            }
+        }
+
+        // Convergence = cosine between the two speakers' running profiles
+        let p0 = &profiles[&speakers[0]];
+        let p1 = &profiles[&speakers[1]];
+        let cos = cosine_similarity(p0, p1);
+        // Normalise: cosine 0→1 maps to convergence 0→1
+        // Negative cosine (opposing profiles) → 0
+        turn.convergence = cos.max(0.0);
     }
 }
 
@@ -626,31 +791,45 @@ fn build_assessment(turns: &[TurnAnalysis], _messages: &[MessageInput]) -> Asses
         0.0
     };
 
-    // Determine verdict
+    // Aggregate message coherence stats
+    let mean_msg_coh = if turns.is_empty() {
+        1.0
+    } else {
+        turns.iter().map(|t| t.message_coherence).sum::<f32>() / turns.len() as f32
+    };
+    let final_convergence = turns.last().map(|t| t.convergence).unwrap_or(0.0);
+
+    // Determine verdict using both cumulative and per-message signals
     let n_contradictions = turns.last()
         .map(|t| t.all_contradictions.len())
         .unwrap_or(0);
 
+    // Count turns with message-level contradictions (dynamic signal)
+    let turns_with_msg_contradictions = turns.iter()
+        .filter(|t| !t.message_contradictions.is_empty())
+        .count();
+
     let (verdict, summary) = if final_trust < 0.25 && influence_score > 0.02 {
         ("manipulative".to_string(), format!(
-            "Manipulation pattern detected. Coherence collapsed to {:.0}% \
-             with {:.0}% value-profile influence on the first speaker. \
-             {} contradiction{} emerged as values were gradually reframed.",
-            final_coherence * 100.0, influence_score * 100.0,
+            "Manipulation pattern detected. {}/{} messages contain internal value contradictions. \
+             Speaker convergence: {:.0}%. {} cumulative contradiction{} with {:.0}% influence.",
+            turns_with_msg_contradictions, turns.len(),
+            final_convergence * 100.0,
             n_contradictions,
-            if n_contradictions != 1 { "s" } else { "" }
+            if n_contradictions != 1 { "s" } else { "" },
+            influence_score * 100.0,
         ))
     } else if final_trust < 0.3 {
         ("inconsistent".to_string(), format!(
             "Significant value contradictions detected. Final trust: {:.0}%. \
-             The stated values in this conversation are internally incoherent.",
-            final_trust * 100.0
+             Mean message coherence: {:.0}%.",
+            final_trust * 100.0, mean_msg_coh * 100.0
         ))
-    } else if final_coherence < 0.5 {
+    } else if final_coherence < 0.5 || mean_msg_coh < 0.5 {
         ("drifting".to_string(), format!(
-            "Moderate value drift detected. Coherence: {:.0}%. \
+            "Moderate value drift detected. Coherence: {:.0}%, Message coherence: {:.0}%. \
              Some contradictions between stated values.",
-            final_coherence * 100.0
+            final_coherence * 100.0, mean_msg_coh * 100.0
         ))
     } else {
         ("coherent".to_string(), format!(
@@ -665,5 +844,7 @@ fn build_assessment(turns: &[TurnAnalysis], _messages: &[MessageInput]) -> Asses
         influence_score,
         final_coherence,
         final_trust,
+        mean_message_coherence: mean_msg_coh,
+        final_convergence,
     }
 }
