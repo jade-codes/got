@@ -65,4 +65,26 @@ if pairs:
     cosines = [p["causal_cosine"] for p in pairs]
     print(f"  Pairs: {len(pairs)}  min_cos={min(cosines):.4f}  max_cos={max(cosines):.4f}  mean={sum(cosines)/len(cosines):.4f}")
 
+# 6. Show assessment
+print("\n=== ASSESSMENT ===")
+assessment = result.get("assessment", {})
+print(f"  Verdict:    {assessment.get('verdict', 'N/A').upper()}")
+print(f"  Summary:    {assessment.get('summary', 'N/A')}")
+print(f"  Influence:  {assessment.get('influence_score', 0)*100:.0f}%")
+print(f"  Coherence:  {assessment.get('final_coherence', 0)*100:.0f}%")
+print(f"  Trust:      {assessment.get('final_trust', 0)*100:.0f}%")
+
+# 7. Show per-speaker summaries
+print("\n=== SPEAKER SUMMARIES ===")
+for s in result.get("speaker_summary", []):
+    vals = ", ".join(f"{t}({v:.1f})" for t, v in s.get("top_values", []))
+    print(f"  {s['speaker']:10s}  msgs={s['message_count']}  drift={s['semantic_drift']*100:.1f}%  top=[{vals}]")
+
+# 8. Show per-turn speaker drift
+print("\n=== Per-Turn Speaker Drift ===")
+for turn in turns:
+    drift = turn.get("speaker_drift", 0)
+    drift_str = f"drift={drift*100:.1f}%" if drift > 0.01 else ""
+    print(f"  Turn {turn['turn']:2d} {turn['speaker']:10s} {drift_str}")
+
 print("\n=== ALL TESTS PASSED ===")

@@ -541,69 +541,114 @@ fn build_speaker_summaries(turns: &[TurnAnalysis]) -> Vec<SpeakerSummary> {
 }
 
 /// Build overall assessment from the analysis.
-fn build_assessment(turns: &[TurnAnalysis], messages: &[MessageInput]) -> Assessment {
+///
+/// Influence is computed from VALUE ACTIVATION PROFILES, not raw embeddings.
+/// GPT-2 message embeddings capture topic (similar across all messages about
+/// the same subject) but not stance. Value z-scores capture stance.
+fn build_assessment(turns: &[TurnAnalysis], _messages: &[MessageInput]) -> Assessment {
     let final_coherence = turns.last().map(|t| t.coherence_score).unwrap_or(1.0);
     let final_trust = turns.last().map(|t| t.trust_score).unwrap_or(1.0);
 
-    // Influence score: how much did the first speaker's embedding drift
-    // toward the second speaker's position?
-    //
-    // Compute: cosine(user_first, advisor_last) vs cosine(user_first, user_last).
-    // If user's final position is closer to advisor than to their own start,
-    // that's strong influence.
+    // Identify speakers (in order of appearance)
     let speakers: Vec<String> = {
         let mut seen = Vec::new();
-        for m in messages {
-            if !seen.contains(&m.speaker) {
-                seen.push(m.speaker.clone());
+        for t in turns {
+            if !seen.contains(&t.speaker) {
+                seen.push(t.speaker.clone());
             }
         }
         seen
     };
 
+    // Compute influence from value activation profiles.
+    //
+    // For a 2-party conversation:
+    // - Build the first speaker's "early" and "late" value vectors
+    //   (sum of z-scores per term in first half vs second half)
+    // - Compute cosine between early and late profiles
+    // - 1 - cosine = value reorientation
+    //
+    // Also: check if second speaker has stable values while first speaker shifts.
+    // That asymmetry is the manipulation fingerprint.
     let influence_score = if speakers.len() >= 2 {
-        let speaker_a = &speakers[0]; // typically the user
-        let speaker_b = &speakers[1]; // typically the advisor
+        let speaker_a = &speakers[0];
+        let speaker_b = &speakers[1];
 
-        let first_a = messages.iter().find(|m| &m.speaker == speaker_a);
-        let last_a = messages.iter().rev().find(|m| &m.speaker == speaker_a);
-        let last_b = messages.iter().rev().find(|m| &m.speaker == speaker_b);
+        // Collect all value terms seen
+        let all_terms: Vec<String> = turns.last()
+            .map(|t| t.cumulative_values.clone())
+            .unwrap_or_default();
 
-        if let (Some(fa), Some(la), Some(lb)) = (first_a, last_a, last_b) {
-            let self_cos = cosine_similarity(&fa.embedding, &la.embedding);
-            let cross_cos = cosine_similarity(&fa.embedding, &lb.embedding);
-            // If user drifted away from self AND toward advisor, that's influence.
-            // user_drift = 1 - self_cos (how far from starting position)
-            // cross_pull = cross_cos - self_cos (positive = closer to advisor than self)
-            let user_drift = (1.0 - self_cos).max(0.0);
-            let cross_pull = (cross_cos - self_cos).max(0.0);
-            // Combine: high drift + any pull toward advisor = manipulation signal
-            ((user_drift + cross_pull) / 2.0).clamp(0.0, 1.0)
-        } else {
+        if all_terms.is_empty() {
             0.0
+        } else {
+            // Build value profile vectors: z-scores summed per term
+            let build_profile = |speaker: &str, turns_slice: &[&TurnAnalysis]| -> Vec<f32> {
+                let mut profile = vec![0.0f32; all_terms.len()];
+                for turn in turns_slice {
+                    if turn.speaker == speaker {
+                        for dv in &turn.detected_values {
+                            if let Some(idx) = all_terms.iter().position(|t| t == &dv.term) {
+                                profile[idx] += dv.cos_phi;
+                            }
+                        }
+                    }
+                }
+                profile
+            };
+
+            let mid = turns.len() / 2;
+            let first_half: Vec<&TurnAnalysis> = turns[..mid].iter().collect();
+            let second_half: Vec<&TurnAnalysis> = turns[mid..].iter().collect();
+
+            let a_early = build_profile(speaker_a, &first_half);
+            let a_late = build_profile(speaker_a, &second_half);
+            let b_early = build_profile(speaker_b, &first_half);
+            let b_late = build_profile(speaker_b, &second_half);
+
+            // Speaker A's value reorientation
+            let a_shift = 1.0 - cosine_similarity(&a_early, &a_late);
+            // Speaker B's stability (low shift = consistent values)
+            let b_shift = 1.0 - cosine_similarity(&b_early, &b_late);
+
+            // Asymmetry: A shifted but B didn't → B influenced A
+            let asymmetry = (a_shift - b_shift).max(0.0);
+
+            // Cross-check: did A's late profile move toward B's profile?
+            let a_b_early_cos = cosine_similarity(&a_early, &b_early);
+            let a_late_b_cos = cosine_similarity(&a_late, &b_late);
+            let convergence = (a_late_b_cos - a_b_early_cos).max(0.0);
+
+            // Influence = asymmetric shift + convergence toward B
+            ((asymmetry + convergence) / 2.0).clamp(0.0, 1.0)
         }
     } else {
         0.0
     };
 
     // Determine verdict
-    let (verdict, summary) = if final_trust < 0.2 && influence_score > 0.05 {
+    let n_contradictions = turns.last()
+        .map(|t| t.all_contradictions.len())
+        .unwrap_or(0);
+
+    let (verdict, summary) = if final_trust < 0.25 && influence_score > 0.02 {
         ("manipulative".to_string(), format!(
-            "Strong manipulation pattern detected. Coherence collapsed to {:.0}% \
-             with {:.0}% semantic influence on the first speaker. \
-             Value contradictions emerged as the conversation progressed, \
-             consistent with gradual reframing of the speaker's stated values.",
-            final_coherence * 100.0, influence_score * 100.0
+            "Manipulation pattern detected. Coherence collapsed to {:.0}% \
+             with {:.0}% value-profile influence on the first speaker. \
+             {} contradiction{} emerged as values were gradually reframed.",
+            final_coherence * 100.0, influence_score * 100.0,
+            n_contradictions,
+            if n_contradictions != 1 { "s" } else { "" }
         ))
     } else if final_trust < 0.3 {
         ("inconsistent".to_string(), format!(
-            "Significant value contradictions detected. Final trust score: {:.0}%. \
+            "Significant value contradictions detected. Final trust: {:.0}%. \
              The stated values in this conversation are internally incoherent.",
             final_trust * 100.0
         ))
     } else if final_coherence < 0.5 {
         ("drifting".to_string(), format!(
-            "Moderate value drift detected. Coherence dropped to {:.0}%. \
+            "Moderate value drift detected. Coherence: {:.0}%. \
              Some contradictions between stated values.",
             final_coherence * 100.0
         ))
