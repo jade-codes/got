@@ -7,11 +7,11 @@
 //   3. Returns a demo conversation at GET /api/demo-conversation
 //
 // Two modes:
-//   - Synthetic demo (default): compiled-in 32-d hand-crafted embeddings.
 //   - Real model (--geometry path.gotue --vocab vocab.json):
 //       loads GPT-2 (or any transformer) unembedding matrix,
-//       builds Φ = UᵀU from the real model, and uses vocabulary
-//       rows as value-term embeddings.
+//       builds Φ = I and uses vocabulary rows as value-term embeddings.
+//   - Synthetic demo (--synthetic): compiled-in 32-d hand-crafted embeddings.
+//       For development and testing only. Not credible for analysis.
 // ---------------------------------------------------------------------------
 
 mod api;
@@ -30,6 +30,7 @@ use axum::{
 use clap::Parser;
 use got_core::geometry::CausalGeometry;
 use got_core::UnembeddingMatrix;
+use got_incoherence::coherence::CoherenceConfig;
 use got_incoherence::embeddings::{EmbeddingSource, PrecomputedEmbeddings, UnembeddingLookup};
 use got_web::AppState;
 use tower_http::cors::{Any, CorsLayer};
@@ -57,6 +58,11 @@ struct Args {
     /// Listen address (default: 127.0.0.1:3000).
     #[arg(long, default_value = "127.0.0.1:3000")]
     listen: String,
+
+    /// Run in synthetic demo mode (hand-crafted 32-d embeddings).
+    /// For development/testing only — not credible for real analysis.
+    #[arg(long)]
+    synthetic: bool,
 }
 
 // Default value terms to look up in any model's vocabulary.
@@ -119,6 +125,12 @@ fn build_synthetic_state() -> AppState {
         hidden_dim: dim,
         mode: "synthetic-demo".into(),
         demo_conversation_json: demo::demo_conversation_json().to_string(),
+        default_config: CoherenceConfig {
+            antonym_threshold: -0.5,
+            synonym_threshold: 0.8,
+            severity_scale: None,
+        },
+        introduction_threshold: 0.0,
     }
 }
 
@@ -281,6 +293,12 @@ fn build_real_state(
         hidden_dim,
         mode: "gpt2".into(),
         demo_conversation_json,
+        default_config: CoherenceConfig {
+            antonym_threshold: -0.15,
+            synonym_threshold: 0.20,
+            severity_scale: Some(0.10),
+        },
+        introduction_threshold: 1.0,
     }
 }
 
@@ -288,7 +306,11 @@ fn build_real_state(
 async fn main() {
     let args = Args::parse();
 
-    let state = if let Some(ref gotue_path) = args.geometry {
+    let state = if args.synthetic {
+        eprintln!("*** SYNTHETIC DEMO MODE — NOT REAL MODEL DATA ***");
+        eprintln!("This mode uses hand-crafted 32-d embeddings for development only.");
+        build_synthetic_state()
+    } else if let Some(ref gotue_path) = args.geometry {
         let vocab_path = args.vocab.as_deref()
             .expect("--vocab is required when --geometry is specified");
         build_real_state(
@@ -297,8 +319,9 @@ async fn main() {
             args.demo_conversation.as_deref(),
         )
     } else {
-        eprintln!("No --geometry specified, using synthetic demo mode");
-        build_synthetic_state()
+        eprintln!("error: specify --geometry <path.gotue> --vocab <vocab.json> for real model mode,");
+        eprintln!("       or --synthetic for hand-crafted demo data (development only).");
+        std::process::exit(1);
     };
 
     eprintln!("Mode: {} | hidden_dim: {} | terms: {}",

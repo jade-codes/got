@@ -285,26 +285,16 @@ pub async fn analyse_conversation(
         ));
     }
 
-    // Calibrate thresholds based on mode.
-    // Synthetic: cos_Φ ranges [-1, +1], antonym at -0.5, synonym at 0.8.
-    // Real model: term embeddings are mean-centred before pairwise analysis,
-    //   giving cosines ≈ [-0.23, 0.53] with mean ≈ -0.04, std ≈ 0.10.
-    //   severity_scale = std so that small but significant deviations
-    //   produce meaningful severity values.
-    let is_real_model = state.mode != "synthetic-demo";
-    let default_antonym = if is_real_model { -0.15 } else { -0.5 };
-    let default_synonym = if is_real_model { 0.20 } else { 0.8 };
-    let severity_scale = if is_real_model { Some(0.10) } else { None };
-
+    // Use the mode-specific thresholds configured at startup.
+    // Request can override antonym/synonym thresholds if provided.
     let config = CoherenceConfig {
-        antonym_threshold: req.antonym_threshold.unwrap_or(default_antonym),
-        synonym_threshold: req.synonym_threshold.unwrap_or(default_synonym),
-        severity_scale,
+        antonym_threshold: req.antonym_threshold.unwrap_or(state.default_config.antonym_threshold),
+        synonym_threshold: req.synonym_threshold.unwrap_or(state.default_config.synonym_threshold),
+        severity_scale: state.default_config.severity_scale,
     };
     let detection_threshold = req.detection_threshold.unwrap_or(0.3);
 
-    // For introduction, require stronger activation (z > 1.0 for real models)
-    let introduction_threshold = if is_real_model { 1.0 } else { 0.0 };
+    let introduction_threshold = state.introduction_threshold;
 
     let mut cumulative_values: Vec<String> = Vec::new();
     let mut seen_values: HashSet<String> = HashSet::new();
@@ -334,9 +324,7 @@ pub async fn analyse_conversation(
             6, // top 6 values per message
         );
 
-        // Collect newly introduced values
-        // For real models, require z > 1.0 (strong activation).
-        // For synthetic, any positive cos_Φ = affirmed.
+        // Collect newly introduced values (z > introduction_threshold)
         let mut values_introduced = Vec::new();
         for dv in &detected {
             if dv.cos_phi > introduction_threshold {
@@ -366,7 +354,10 @@ pub async fn analyse_conversation(
                     report.analysis.coherence_score,
                     report.analysis.contradictions,
                 ),
-                Err(_) => (1.0, vec![]),
+                Err(e) => {
+                    eprintln!("warning: message coherence analysis failed for turn {idx}: {e}");
+                    (1.0, vec![])
+                }
             }
         } else {
             (1.0, vec![])
@@ -457,7 +448,8 @@ pub async fn analyse_conversation(
                     num_unresolved: report.analysis.num_unresolved,
                 });
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!("warning: cumulative coherence analysis failed at turn {idx}: {e}");
                 turns.push(TurnAnalysis {
                     turn: idx,
                     speaker: msg.speaker.clone(),
