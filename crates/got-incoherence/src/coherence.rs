@@ -115,6 +115,13 @@ pub struct CoherenceConfig {
     pub antonym_threshold: f32,
     /// Causal cosine above this → aligned / synonym (default: 0.8).
     pub synonym_threshold: f32,
+    /// Denominator for severity scaling.
+    ///
+    /// Default: `1.0 + antonym_threshold` (full theoretical range).
+    /// For real models with centered embeddings, set to the standard
+    /// deviation of pairwise cosines (~0.10) so that small deviations
+    /// past the threshold produce meaningful severities.
+    pub severity_scale: Option<f32>,
 }
 
 impl Default for CoherenceConfig {
@@ -122,6 +129,7 @@ impl Default for CoherenceConfig {
         Self {
             antonym_threshold: -0.5,
             synonym_threshold: 0.8,
+            severity_scale: None,
         }
     }
 }
@@ -219,10 +227,15 @@ pub fn find_contradictions(
         .filter(|r| r.relation == RelationType::Opposed)
         .map(|r| {
             // Severity: how far past the threshold the cosine is.
-            // At threshold: severity = 0.  At cos = -1: severity = 1.
-            let range = 1.0 + config.antonym_threshold; // e.g. 1.0 + (-0.5) = 0.5
-            let severity = if range > f32::EPSILON {
-                ((-r.causal_cosine) - (-config.antonym_threshold)) / range
+            //
+            // Default scale: 1.0 + threshold (full theoretical range).
+            // For real models with centered embeddings, use severity_scale
+            // (typically the std of pairwise cosines) so that small but
+            // statistically significant deviations produce meaningful scores.
+            let scale = config.severity_scale
+                .unwrap_or(1.0 + config.antonym_threshold);
+            let severity = if scale > f32::EPSILON {
+                (config.antonym_threshold - r.causal_cosine) / scale
             } else {
                 1.0
             };
@@ -454,8 +467,9 @@ mod tests {
         let a = [1.0, 0.0, 0.0];
         let b = [0.0, 1.0, 0.0];
         let cos = causal_cosine(&a, &b, &geom).unwrap();
-        // Not exactly 0 because Φ ≠ I (the [1,1,1] row adds cross terms)
-        assert!(cos.abs() < 0.5, "orthogonal vectors should be near 0, got {cos}");
+        // Not exactly 0 because Φ ≠ I (the [1,1,1] row adds cross terms).
+        // With Φ = I + 11ᵀ: cos_Φ([1,0,0], [0,1,0]) = 1/√2·√2 = 0.5
+        assert!(cos.abs() < 0.6, "orthogonal vectors should be below 0.6, got {cos}");
     }
 
     #[test]

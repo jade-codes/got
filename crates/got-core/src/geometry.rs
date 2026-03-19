@@ -41,6 +41,8 @@ pub struct CausalGeometry {
     hidden_dim: usize,
     is_full_rank: bool,
     epsilon: f32,
+    /// True when Φ = I — inner product degenerates to plain dot product.
+    is_identity: bool,
 }
 
 /// Cholesky factorisation check: returns `true` if the `d×d` row-major
@@ -62,10 +64,23 @@ fn cholesky_check(gram: &[f32], d: usize) -> bool {
                 l[i * d + j] = diag.sqrt();
             } else {
                 let denom = l[j * d + j];
-                if denom.abs() < 1e-30 {
+                if denom.abs() < f32::EPSILON {
                     return false;
                 }
                 l[i * d + j] = (gram[i * d + j] - sum) / denom;
+            }
+        }
+    }
+    true
+}
+
+/// Check whether a d×d row-major matrix is the identity (within f32 tolerance).
+fn is_identity_matrix(gram: &[f32], d: usize) -> bool {
+    for i in 0..d {
+        for j in 0..d {
+            let expected = if i == j { 1.0 } else { 0.0 };
+            if (gram[i * d + j] - expected).abs() > 1e-6 {
+                return false;
             }
         }
     }
@@ -111,6 +126,7 @@ impl CausalGeometry {
             hidden_dim: d,
             is_full_rank,
             epsilon,
+            is_identity: false,
         }
     }
 
@@ -153,19 +169,30 @@ impl CausalGeometry {
         // S-12: Cholesky factorisation to check positive-definiteness.
         let is_full_rank = cholesky_check(&gram, hidden_dim);
 
+        // Detect identity matrix for fast-path inner products.
+        let is_identity = is_identity_matrix(&gram, hidden_dim);
+
         Ok(Self {
             gram,
             hidden_dim,
             is_full_rank,
             epsilon: 0.0,
+            is_identity,
         })
     }
 
     /// Compute the causal inner product ⟨w, h⟩_c = wᵀ Φ h.
+    ///
+    /// When Φ = I this is a plain dot product (O(d) instead of O(d²)).
     pub fn inner_product(&self, w: &[f32], h: &[f32]) -> Result<f32, GeometryError> {
         let d = self.hidden_dim;
         self.check_vec(w)?;
         self.check_vec(h)?;
+
+        if self.is_identity {
+            let result: f32 = w.iter().zip(h.iter()).map(|(a, b)| a * b).sum();
+            return Ok(result);
+        }
 
         // Compute Φh (d-dimensional vector)
         let phi_h: Vec<f32> = (0..d)
@@ -179,11 +206,14 @@ impl CausalGeometry {
 
     /// Compute Φh — the Gram-matrix–vector product.
     ///
-    /// This is the gradient multiplier: during training the gradient of the
-    /// logistic loss w.r.t. weights includes the factor Φh.
+    /// When Φ = I, returns a clone of h.
     pub fn gram_vec(&self, h: &[f32]) -> Result<Vec<f32>, GeometryError> {
         let d = self.hidden_dim;
         self.check_vec(h)?;
+
+        if self.is_identity {
+            return Ok(h.to_vec());
+        }
 
         let phi_h: Vec<f32> = (0..d)
             .map(|i| (0..d).map(|j| self.gram[i * d + j] * h[j]).sum::<f32>())

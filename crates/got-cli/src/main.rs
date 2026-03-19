@@ -1107,6 +1107,7 @@ fn cmd_coherence_check(
     let config = CoherenceConfig {
         antonym_threshold,
         synonym_threshold,
+        severity_scale: None,
     };
 
     let report = got_incoherence::analyse_value_system(&term_refs, &source, &geometry, &config)

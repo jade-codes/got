@@ -20,6 +20,9 @@ header {
 }
 header h1 { font-size: 18px; font-weight: 600; color: #f0f6fc; }
 header .subtitle { font-size: 13px; color: #8b949e; }
+.mode-banner { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; margin-left: 12px; letter-spacing: 0.05em; }
+.mode-synthetic { background: #3d2200; color: #f0883e; }
+.mode-live { background: #1a3d1a; color: #56d364; }
 
 /* Coherence timeline strip */
 .timeline-strip {
@@ -204,6 +207,7 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
 <header>
   <h1>Geometry of Trust</h1>
   <span class="subtitle">Conversational Incoherence Tracker</span>
+  <span id="modeBanner" class="mode-banner mode-synthetic">SYNTHETIC DEMO</span>
 </header>
 
 <!-- Coherence timeline -->
@@ -328,6 +332,16 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
       });
       analysis = await analysisRes.json();
 
+      // Update mode banner
+      const modeBanner = document.getElementById('modeBanner');
+      if (analysis.mode && analysis.mode !== 'synthetic-demo') {
+        modeBanner.textContent = 'LIVE: ' + analysis.mode.toUpperCase() + ' GEOMETRY';
+        modeBanner.className = 'mode-banner mode-live';
+      } else {
+        modeBanner.textContent = 'SYNTHETIC DEMO';
+        modeBanner.className = 'mode-banner mode-synthetic';
+      }
+
       chatHeader.textContent = conversation.title || 'Conversation';
       renderConversation();
       renderTimeline();
@@ -367,11 +381,13 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
       // Detected value chips (from causal projection)
       if (turn.detected_values && turn.detected_values.length > 0) {
         html += '<div class="msg-values">';
+        const isReal = analysis.mode && analysis.mode !== 'synthetic-demo';
         turn.detected_values.forEach(dv => {
           const isNew = turn.values_introduced.includes(dv.term);
           const cls = dv.cos_phi < 0 ? 'negative' : (isNew ? 'new' : '');
           const sign = dv.cos_phi >= 0 ? '+' : '';
-          html += '<span class="value-chip ' + cls + '" title="cos\u03A6 = ' + dv.cos_phi.toFixed(3) + '">'
+          const label = isReal ? 'z' : 'cos\u03A6';
+          html += '<span class="value-chip ' + cls + '" title="' + label + ' = ' + dv.cos_phi.toFixed(3) + '">'
             + esc(dv.term) + ' <small>' + sign + dv.cos_phi.toFixed(2) + '</small></span>';
         });
         html += '</div>';

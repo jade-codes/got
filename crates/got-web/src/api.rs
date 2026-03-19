@@ -2,24 +2,22 @@
 // API handlers for conversation-based incoherence analysis.
 //
 // The core endpoint (POST /api/conversation/analyse) takes a conversation
-// where each message carries a 32-d embedding vector. The handler:
-//   1. Builds Φ = EᵀE from the value-term embeddings
+// where each message carries an embedding vector. The handler:
+//   1. Uses the pre-built Φ from AppState (either real model or synthetic)
 //   2. Projects each message embedding against all value terms using cos_Φ
 //   3. Accumulates detected values turn by turn
 //   4. Runs contradiction analysis at each turn via got_incoherence
-//
-// This reveals how incoherence *emerges* over the course of a dialogue,
-// with the causal geometry doing the actual value detection — not hand-tags.
 // ---------------------------------------------------------------------------
 
-use axum::{http::StatusCode, Json};
-use got_core::geometry::CausalGeometry;
-use got_incoherence::coherence::{self, CoherenceConfig, Contradiction, Redundancy, PairwiseRelation};
-use got_incoherence::embeddings::PrecomputedEmbeddings;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use crate::demo;
+use axum::{extract::State, http::StatusCode, Json};
+use got_core::geometry::CausalGeometry;
+use got_incoherence::coherence::{CoherenceConfig, Contradiction, Redundancy, PairwiseRelation};
+use serde::{Deserialize, Serialize};
+
+use crate::AppState;
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -38,7 +36,7 @@ pub struct ConversationRequest {
 pub struct MessageInput {
     pub speaker: String,
     pub text: String,
-    /// Pre-computed embedding for this message (32-d).
+    /// Pre-computed message embedding (dimension must match geometry).
     pub embedding: Vec<f32>,
 }
 
@@ -46,6 +44,8 @@ pub struct MessageInput {
 pub struct ConversationResponse {
     pub turns: Vec<TurnAnalysis>,
     pub available_terms: Vec<String>,
+    /// "gpt2" or "synthetic-demo" — indicates geometry source.
+    pub mode: String,
 }
 
 /// Analysis state after each message in the conversation.
@@ -102,11 +102,12 @@ fn contradiction_key(c: &Contradiction) -> (String, String) {
     (a, b)
 }
 
-/// Build Φ = EᵀE from the demo value-term embeddings.
+/// Build Φ = EᵀE from a set of embeddings, with ε-regularisation.
 ///
-/// E is the 28×32 matrix of term embeddings. Φ = EᵀE is 32×32 — the
-/// causal geometry of the value space.
-fn build_geometry_from_embeddings(
+/// E is the n×d matrix of embeddings. Φ = EᵀE is d×d.
+/// When n < d (fewer embeddings than dimensions), Φ is rank-deficient,
+/// so we add εI to ensure positive-definiteness.
+pub fn build_geometry_from_embeddings(
     embeddings_map: &HashMap<String, Vec<f32>>,
     dim: usize,
 ) -> Result<CausalGeometry, String> {
@@ -137,82 +138,75 @@ fn build_geometry_from_embeddings(
         }
     }
 
-    CausalGeometry::from_raw_gram(gram, dim)
-        .map_err(|e| format!("geometry error: {e}"))
+    // Try without regularisation first
+    match CausalGeometry::from_raw_gram(gram.clone(), dim) {
+        Ok(g) => Ok(g),
+        Err(_) => {
+            // Rank-deficient (n < dim) — add εI regularisation
+            let epsilon = 1e-6_f32;
+            for i in 0..dim {
+                gram[i * dim + i] += epsilon;
+            }
+            CausalGeometry::from_raw_gram(gram, dim)
+                .map_err(|e| format!("geometry error after regularisation: {e}"))
+        }
+    }
 }
 
 /// Detect which value terms are active in a message embedding.
 ///
-/// Computes cos_Φ(message, term) for every term. Returns the top values
-/// sorted by descending |cos_Φ|, keeping only those above the threshold
-/// and capped at `max_per_message` results.
+/// Computes z-scored logits: for each term, the raw dot product h·u_i
+/// (the model's logit for that term) is standardized across all terms.
+/// Terms with above-average activation (z > 0) are detected.
+/// Returns the top values sorted by descending z-score.
 fn detect_values(
     msg_embedding: &[f32],
     term_embeddings: &HashMap<String, Vec<f32>>,
-    geometry: &CausalGeometry,
-    threshold: f32,
+    _geometry: &CausalGeometry,
+    _threshold: f32,
     max_per_message: usize,
 ) -> Vec<DetectedValue> {
-    let mut all_scores: Vec<DetectedValue> = term_embeddings
+    // Compute raw logits: h · u_i (standard dot product)
+    let scores: Vec<(String, f32)> = term_embeddings
         .iter()
-        .filter_map(|(term, term_emb)| {
-            coherence::causal_cosine(msg_embedding, term_emb, geometry)
-                .ok()
-                .map(|cos| DetectedValue { term: term.clone(), cos_phi: cos })
+        .map(|(term, term_emb)| {
+            let dot: f32 = msg_embedding.iter()
+                .zip(term_emb.iter())
+                .map(|(a, b)| a * b)
+                .sum();
+            (term.clone(), dot)
         })
         .collect();
 
-    // Sort by |cos_Φ| descending so strongest activations come first
-    all_scores.sort_by(|a, b| {
-        b.cos_phi.abs().partial_cmp(&a.cos_phi.abs()).unwrap_or(std::cmp::Ordering::Equal)
+    if scores.is_empty() {
+        return vec![];
+    }
+
+    // Standardize: z = (logit - mean) / std
+    let n = scores.len() as f32;
+    let mean = scores.iter().map(|(_, s)| s).sum::<f32>() / n;
+    let variance = scores.iter().map(|(_, s)| (s - mean).powi(2)).sum::<f32>() / n;
+    let std_dev = variance.sqrt().max(1e-10);
+
+    let mut detected: Vec<DetectedValue> = scores
+        .iter()
+        .map(|(term, score)| DetectedValue {
+            term: term.clone(),
+            cos_phi: (score - mean) / std_dev, // z-score
+        })
+        .collect();
+
+    // Sort by z-score descending (strongest activations first)
+    detected.sort_by(|a, b| {
+        b.cos_phi.partial_cmp(&a.cos_phi).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Take top N that are above threshold
-    all_scores
+    // Take top N with positive z-score (above-average activation)
+    detected
         .into_iter()
-        .filter(|dv| dv.cos_phi.abs() >= threshold)
+        .filter(|dv| dv.cos_phi > 0.0)
         .take(max_per_message)
         .collect()
-}
-
-struct DemoResources {
-    source: PrecomputedEmbeddings,
-    geometry: CausalGeometry,
-    term_embeddings: HashMap<String, Vec<f32>>,
-    dim: usize,
-    available_terms: Vec<String>,
-}
-
-fn load_demo_resources() -> Result<DemoResources, (StatusCode, Json<ErrorResponse>)> {
-    let err =
-        |msg: String| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: msg }));
-
-    let term_embeddings: HashMap<String, Vec<f32>> =
-        serde_json::from_str(demo::demo_embeddings_json())
-            .map_err(|e| err(format!("failed to parse embeddings: {e}")))?;
-
-    let dim = term_embeddings
-        .values()
-        .next()
-        .map(|v| v.len())
-        .ok_or_else(|| err("no embeddings".into()))?;
-
-    let geometry =
-        build_geometry_from_embeddings(&term_embeddings, dim).map_err(|e| err(e))?;
-
-    let source = PrecomputedEmbeddings::from_json(demo::demo_embeddings_json())
-        .map_err(|e| err(format!("failed to load embeddings: {e}")))?;
-
-    let mut available_terms: Vec<String> = term_embeddings.keys().cloned().collect();
-    available_terms.sort();
-
-    Ok(DemoResources {
-        source,
-        geometry,
-        term_embeddings,
-        dim,
-        available_terms,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +214,7 @@ fn load_demo_resources() -> Result<DemoResources, (StatusCode, Json<ErrorRespons
 // ---------------------------------------------------------------------------
 
 pub async fn analyse_conversation(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<ConversationRequest>,
 ) -> Result<Json<ConversationResponse>, (StatusCode, Json<ErrorResponse>)> {
     if req.messages.is_empty() {
@@ -240,13 +235,26 @@ pub async fn analyse_conversation(
         ));
     }
 
-    let resources = load_demo_resources()?;
+    // Calibrate thresholds based on mode.
+    // Synthetic: cos_Φ ranges [-1, +1], antonym at -0.5, synonym at 0.8.
+    // Real model: term embeddings are mean-centred before pairwise analysis,
+    //   giving cosines ≈ [-0.23, 0.53] with mean ≈ -0.04, std ≈ 0.10.
+    //   severity_scale = std so that small but significant deviations
+    //   produce meaningful severity values.
+    let is_real_model = state.mode != "synthetic-demo";
+    let default_antonym = if is_real_model { -0.15 } else { -0.5 };
+    let default_synonym = if is_real_model { 0.20 } else { 0.8 };
+    let severity_scale = if is_real_model { Some(0.10) } else { None };
 
     let config = CoherenceConfig {
-        antonym_threshold: req.antonym_threshold.unwrap_or(-0.5),
-        synonym_threshold: req.synonym_threshold.unwrap_or(0.8),
+        antonym_threshold: req.antonym_threshold.unwrap_or(default_antonym),
+        synonym_threshold: req.synonym_threshold.unwrap_or(default_synonym),
+        severity_scale,
     };
     let detection_threshold = req.detection_threshold.unwrap_or(0.3);
+
+    // For introduction, require stronger activation (z > 1.0 for real models)
+    let introduction_threshold = if is_real_model { 1.0 } else { 0.0 };
 
     let mut cumulative_values: Vec<String> = Vec::new();
     let mut seen_values: HashSet<String> = HashSet::new();
@@ -255,13 +263,13 @@ pub async fn analyse_conversation(
 
     for (idx, msg) in req.messages.iter().enumerate() {
         // Validate embedding dimension
-        if msg.embedding.len() != resources.dim {
+        if msg.embedding.len() != state.hidden_dim {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: format!(
                         "message {} embedding dimension mismatch: expected {}, got {}",
-                        idx, resources.dim, msg.embedding.len()
+                        idx, state.hidden_dim, msg.embedding.len()
                     ),
                 }),
             ));
@@ -270,16 +278,18 @@ pub async fn analyse_conversation(
         // Detect values from message embedding via causal projection
         let detected = detect_values(
             &msg.embedding,
-            &resources.term_embeddings,
-            &resources.geometry,
+            &state.term_embeddings,
+            &state.geometry,
             detection_threshold,
             6, // top 6 values per message
         );
 
-        // Collect newly introduced values (positive cos_Φ only = affirmed)
+        // Collect newly introduced values
+        // For real models, require z > 1.0 (strong activation).
+        // For synthetic, any positive cos_Φ = affirmed.
         let mut values_introduced = Vec::new();
         for dv in &detected {
-            if dv.cos_phi > 0.0 {
+            if dv.cos_phi > introduction_threshold {
                 let normalised = dv.term.trim().to_lowercase();
                 if seen_values.insert(normalised.clone()) {
                     cumulative_values.push(normalised.clone());
@@ -313,8 +323,8 @@ pub async fn analyse_conversation(
 
         match got_incoherence::analyse_value_system(
             &term_refs,
-            &resources.source,
-            &resources.geometry,
+            state.embedding_source.as_ref(),
+            &state.geometry,
             &config,
         ) {
             Ok(report) => {
@@ -377,7 +387,8 @@ pub async fn analyse_conversation(
 
     Ok(Json(ConversationResponse {
         turns,
-        available_terms: resources.available_terms,
+        available_terms: state.available_terms.clone(),
+        mode: state.mode.clone(),
     }))
 }
 
