@@ -234,6 +234,32 @@ enum Command {
         output: PathBuf,
     },
 
+    /// Analyse a value system for geometric coherence / contradictions.
+    CoherenceCheck {
+        /// Path to embeddings JSON: { "term": [f32, ...], ... }.
+        #[arg(long)]
+        embeddings: PathBuf,
+        /// Path to unembedding matrix file (.gotue binary).
+        #[arg(long)]
+        unembedding: PathBuf,
+        /// Regularisation epsilon.
+        #[arg(long, default_value = "0.000001")]
+        epsilon: f32,
+        /// Comma-separated list of value terms to analyse.
+        /// If omitted, all terms in the embeddings file are used.
+        #[arg(long, value_delimiter = ',')]
+        values: Option<Vec<String>>,
+        /// Causal cosine threshold for antonym detection (default: -0.5).
+        #[arg(long, default_value = "-0.5")]
+        antonym_threshold: f32,
+        /// Causal cosine threshold for synonym detection (default: 0.8).
+        #[arg(long, default_value = "0.8")]
+        synonym_threshold: f32,
+        /// Output format: "text", "json", "svg-heatmap", or "svg-chord" (default: text).
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
     /// Perform a key rotation ceremony with mutual cross-signatures.
     RotateKey {
         /// Path to the old (current) secret key.
@@ -381,6 +407,23 @@ fn main() -> Result<()> {
             existing_crl,
             next_update_days,
             output,
+        ),
+        Command::CoherenceCheck {
+            embeddings,
+            unembedding,
+            epsilon,
+            values,
+            antonym_threshold,
+            synonym_threshold,
+            format,
+        } => cmd_coherence_check(
+            embeddings,
+            unembedding,
+            epsilon,
+            values,
+            antonym_threshold,
+            synonym_threshold,
+            &format,
         ),
         Command::RotateKey {
             old_key,
@@ -1011,6 +1054,84 @@ fn cmd_drift(reference_path: PathBuf, current_path: PathBuf, epsilon: f32) -> Re
     if drift == 0.0 {
         println!("Geometries are identical.");
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_coherence_check(
+    embeddings_path: PathBuf,
+    unembedding_path: PathBuf,
+    epsilon: f32,
+    values: Option<Vec<String>>,
+    antonym_threshold: f32,
+    synonym_threshold: f32,
+    format: &str,
+) -> Result<()> {
+    use got_incoherence::coherence::CoherenceConfig;
+    use got_incoherence::embeddings::PrecomputedEmbeddings;
+
+    // Load geometry
+    let u = load_unembedding(&unembedding_path)?;
+    let geometry = CausalGeometry::from_unembedding(&u, epsilon);
+
+    println!(
+        "Geometry: d={}, rank={}",
+        geometry.hidden_dim(),
+        if geometry.is_positive_definite() {
+            "full"
+        } else {
+            "deficient (regularised)"
+        }
+    );
+
+    // Load embeddings
+    let emb_json =
+        fs::read_to_string(&embeddings_path).context("failed to read embeddings file")?;
+    let source = PrecomputedEmbeddings::from_json(&emb_json)
+        .context("failed to parse embeddings JSON")?;
+
+    // Determine which terms to analyse
+    let terms: Vec<String> = if let Some(v) = values {
+        v
+    } else {
+        // Use all terms from the embeddings file
+        let map: std::collections::HashMap<String, Vec<f32>> =
+            serde_json::from_str(&emb_json).context("failed to re-parse embeddings for keys")?;
+        let mut keys: Vec<String> = map.into_keys().collect();
+        keys.sort();
+        keys
+    };
+
+    let term_refs: Vec<&str> = terms.iter().map(|s| s.as_str()).collect();
+
+    let config = CoherenceConfig {
+        antonym_threshold,
+        synonym_threshold,
+    };
+
+    let report = got_incoherence::analyse_value_system(&term_refs, &source, &geometry, &config)
+        .context("coherence analysis failed")?;
+
+    match format {
+        "json" => {
+            let json = got_incoherence::report::render_json(&report.analysis)
+                .context("failed to render JSON report")?;
+            println!("{json}");
+        }
+        "svg-heatmap" => {
+            print!("{}", got_incoherence::visual::render_heatmap(&report.analysis));
+        }
+        "svg-chord" => {
+            print!("{}", got_incoherence::visual::render_chord(&report.analysis));
+        }
+        _ => {
+            print!("{}", got_incoherence::report::render_text(&report.analysis));
+            if !report.unresolved.is_empty() {
+                println!("Warning: unresolved terms: {:?}", report.unresolved);
+            }
+        }
+    }
+
     Ok(())
 }
 

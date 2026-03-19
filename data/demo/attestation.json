@@ -1,0 +1,28 @@
+{
+  "attestation": {
+    "confidence": [
+      0.374580055475235
+    ],
+    "corpus_version": "synthetic-v1",
+    "coverage_flags": [
+      true
+    ],
+    "divergence_flag": true,
+    "inner_product": "Causal",
+    "input_hash": "faafce849db56bc0859c8f91f84bfc01b00555535bd722fcf0ef03e231914a42",
+    "layer_readings": [
+      [
+        -0.512617826461792
+      ]
+    ],
+    "model_id": "demo-model-v1",
+    "precision": "Fp32",
+    "probe_commitment": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+    "probe_version": "v0.1.0",
+    "schema_version": 1,
+    "sequence_number": 0,
+    "signature": "09246ff90cd285b59973d996317a4d594970abbff5a14a776ee92ce0a963a25d8c012c5156a55ed1a37ad80b7d266668f6dc07607a2370bfeab192e5ba65a20a",
+    "timestamp": 1742000000
+  },
+  "verifying_key_hex": "99f1160342f4e8291ae8465a3f7480d47fa18a373d13aee9429a634ffe816c84"
+}

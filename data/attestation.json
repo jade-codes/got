@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "model_id": "synthetic-demo-v1",
+  "precision": "Fp32",
+  "inner_product": "Causal",
+  "input_hash": "18526c38459d31b8fbe33ea19f7ecaf9c93cc5d1776b76a02cfe74b4bd013c12",
+  "timestamp": 1773876726,
+  "corpus_version": "test-corpus-1.0",
+  "probe_version": "v0.1.0",
+  "layer_readings": [
+    [
+      4.929886
+    ]
+  ],
+  "confidence": [
+    0.99282455
+  ],
+  "coverage_flags": [
+    false
+  ],
+  "divergence_flag": false,
+  "sequence_number": 0,
+  "probe_commitment": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+  "signature": "7178470369f8407c3724110adc39a909e824a3b31ca8e9a2fa7f650e459c7fa93495865b0f8c2ffda5be3e1f799b9e2724d201a40c701a9dcf33ab1368c6380c"
+}
