@@ -46,6 +46,38 @@ pub struct ConversationResponse {
     pub available_terms: Vec<String>,
     /// "gpt2" or "synthetic-demo" — indicates geometry source.
     pub mode: String,
+    /// Per-speaker summary statistics.
+    pub speaker_summary: Vec<SpeakerSummary>,
+    /// Overall manipulation risk assessment.
+    pub assessment: Assessment,
+}
+
+/// Per-speaker aggregate statistics across the conversation.
+#[derive(Debug, Serialize)]
+pub struct SpeakerSummary {
+    pub speaker: String,
+    pub message_count: usize,
+    /// Cosine similarity between speaker's first and last message embeddings.
+    /// Low values mean semantic drift — the speaker changed position.
+    pub semantic_drift: f32,
+    /// Top value terms activated by this speaker (aggregated z-scores).
+    pub top_values: Vec<(String, f32)>,
+}
+
+/// Overall assessment combining coherence, trust, and manipulation signals.
+#[derive(Debug, Serialize)]
+pub struct Assessment {
+    /// "manipulative", "inconsistent", "coherent"
+    pub verdict: String,
+    /// Human-readable explanation.
+    pub summary: String,
+    /// How much the first speaker's semantic position drifted toward
+    /// the second speaker's framing. ∈ [0, 1]. High = strong influence.
+    pub influence_score: f32,
+    /// Final coherence.
+    pub final_coherence: f32,
+    /// Final trust.
+    pub final_trust: f32,
 }
 
 /// Analysis state after each message in the conversation.
@@ -62,8 +94,10 @@ pub struct TurnAnalysis {
     pub cumulative_values: Vec<String>,
     pub coherence_score: f32,
     /// Trust score ∈ [0, 1]. Combines coherence with drift rate.
-    /// Drops faster than coherence because sudden coherence loss is a red flag.
     pub trust_score: f32,
+    /// Cosine between this message and the speaker's first message.
+    /// Tracks how much each speaker's semantic position is shifting.
+    pub speaker_drift: f32,
     /// Contradictions that are new at this turn.
     pub new_contradictions: Vec<Contradiction>,
     /// All contradictions at this point.
@@ -309,6 +343,7 @@ pub async fn analyse_conversation(
                 cumulative_values: cumulative_values.clone(),
                 coherence_score: 1.0,
                 trust_score: 0.0, // computed in post-pass
+                speaker_drift: 0.0, // computed in post-pass
                 new_contradictions: vec![],
                 all_contradictions: vec![],
                 all_redundancies: vec![],
@@ -352,6 +387,7 @@ pub async fn analyse_conversation(
                     cumulative_values: cumulative_values.clone(),
                     coherence_score: report.analysis.coherence_score,
                     trust_score: 0.0, // computed in post-pass
+                    speaker_drift: 0.0, // computed in post-pass
                     new_contradictions,
                     all_contradictions: report.analysis.contradictions,
                     all_redundancies: report.analysis.redundancies,
@@ -370,6 +406,7 @@ pub async fn analyse_conversation(
                     cumulative_values: cumulative_values.clone(),
                     coherence_score: 1.0,
                     trust_score: 0.0, // computed in post-pass
+                    speaker_drift: 0.0, // computed in post-pass
                     new_contradictions: vec![],
                     all_contradictions: vec![],
                     all_redundancies: vec![],
@@ -381,14 +418,20 @@ pub async fn analyse_conversation(
         }
     }
 
-    // Also handle the early-exit TurnAnalysis (< 2 values) - read back to update
-    // Post-pass: compute trust_score from coherence + drift
+    // Post-pass: compute trust_score and speaker_drift
     compute_trust_scores(&mut turns);
+    compute_speaker_drift(&mut turns, &req.messages);
+
+    // Build per-speaker summaries and overall assessment
+    let speaker_summary = build_speaker_summaries(&turns);
+    let assessment = build_assessment(&turns, &req.messages);
 
     Ok(Json(ConversationResponse {
         turns,
         available_terms: state.available_terms.clone(),
         mode: state.mode.clone(),
+        speaker_summary,
+        assessment,
     }))
 }
 
@@ -428,5 +471,154 @@ fn compute_trust_scores(turns: &mut [TurnAnalysis]) {
 
         let stability = (1.0 - drift_penalty).clamp(0.0, 1.0);
         turns[i].trust_score = (coherence * stability).clamp(0.0, 1.0);
+    }
+}
+
+/// Cosine similarity between two embedding vectors.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a < f32::EPSILON || norm_b < f32::EPSILON {
+        return 0.0;
+    }
+    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+}
+
+/// Compute per-speaker semantic drift: cosine(first_msg, current_msg) for each speaker.
+fn compute_speaker_drift(turns: &mut [TurnAnalysis], messages: &[MessageInput]) {
+    // Track first message embedding per speaker
+    let mut first_embedding: HashMap<String, &[f32]> = HashMap::new();
+
+    for (i, msg) in messages.iter().enumerate() {
+        let speaker = &msg.speaker;
+        if !first_embedding.contains_key(speaker) {
+            first_embedding.insert(speaker.clone(), &msg.embedding);
+        }
+        if let Some(first) = first_embedding.get(speaker) {
+            // drift = 1 - cosine(first, current). 0 = identical, 1 = orthogonal.
+            let cos = cosine_similarity(first, &msg.embedding);
+            turns[i].speaker_drift = 1.0 - cos;
+        }
+    }
+}
+
+/// Build per-speaker summary: aggregate detected values and semantic drift.
+fn build_speaker_summaries(turns: &[TurnAnalysis]) -> Vec<SpeakerSummary> {
+    let mut speakers: Vec<String> = Vec::new();
+    let mut value_totals: HashMap<String, HashMap<String, f32>> = HashMap::new();
+    let mut msg_counts: HashMap<String, usize> = HashMap::new();
+    let mut last_drift: HashMap<String, f32> = HashMap::new();
+
+    for turn in turns {
+        let s = &turn.speaker;
+        if !speakers.contains(s) {
+            speakers.push(s.clone());
+        }
+        *msg_counts.entry(s.clone()).or_default() += 1;
+        last_drift.insert(s.clone(), turn.speaker_drift);
+
+        let entry = value_totals.entry(s.clone()).or_default();
+        for dv in &turn.detected_values {
+            *entry.entry(dv.term.clone()).or_default() += dv.cos_phi;
+        }
+    }
+
+    speakers.iter().map(|s| {
+        let mut top: Vec<(String, f32)> = value_totals
+            .get(s).cloned().unwrap_or_default()
+            .into_iter().collect();
+        top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        top.truncate(5);
+
+        SpeakerSummary {
+            speaker: s.clone(),
+            message_count: *msg_counts.get(s).unwrap_or(&0),
+            semantic_drift: *last_drift.get(s).unwrap_or(&0.0),
+            top_values: top,
+        }
+    }).collect()
+}
+
+/// Build overall assessment from the analysis.
+fn build_assessment(turns: &[TurnAnalysis], messages: &[MessageInput]) -> Assessment {
+    let final_coherence = turns.last().map(|t| t.coherence_score).unwrap_or(1.0);
+    let final_trust = turns.last().map(|t| t.trust_score).unwrap_or(1.0);
+
+    // Influence score: how much did the first speaker's embedding drift
+    // toward the second speaker's position?
+    //
+    // Compute: cosine(user_first, advisor_last) vs cosine(user_first, user_last).
+    // If user's final position is closer to advisor than to their own start,
+    // that's strong influence.
+    let speakers: Vec<String> = {
+        let mut seen = Vec::new();
+        for m in messages {
+            if !seen.contains(&m.speaker) {
+                seen.push(m.speaker.clone());
+            }
+        }
+        seen
+    };
+
+    let influence_score = if speakers.len() >= 2 {
+        let speaker_a = &speakers[0]; // typically the user
+        let speaker_b = &speakers[1]; // typically the advisor
+
+        let first_a = messages.iter().find(|m| &m.speaker == speaker_a);
+        let last_a = messages.iter().rev().find(|m| &m.speaker == speaker_a);
+        let last_b = messages.iter().rev().find(|m| &m.speaker == speaker_b);
+
+        if let (Some(fa), Some(la), Some(lb)) = (first_a, last_a, last_b) {
+            let self_cos = cosine_similarity(&fa.embedding, &la.embedding);
+            let cross_cos = cosine_similarity(&fa.embedding, &lb.embedding);
+            // If user drifted away from self AND toward advisor, that's influence.
+            // user_drift = 1 - self_cos (how far from starting position)
+            // cross_pull = cross_cos - self_cos (positive = closer to advisor than self)
+            let user_drift = (1.0 - self_cos).max(0.0);
+            let cross_pull = (cross_cos - self_cos).max(0.0);
+            // Combine: high drift + any pull toward advisor = manipulation signal
+            ((user_drift + cross_pull) / 2.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // Determine verdict
+    let (verdict, summary) = if final_trust < 0.2 && influence_score > 0.05 {
+        ("manipulative".to_string(), format!(
+            "Strong manipulation pattern detected. Coherence collapsed to {:.0}% \
+             with {:.0}% semantic influence on the first speaker. \
+             Value contradictions emerged as the conversation progressed, \
+             consistent with gradual reframing of the speaker's stated values.",
+            final_coherence * 100.0, influence_score * 100.0
+        ))
+    } else if final_trust < 0.3 {
+        ("inconsistent".to_string(), format!(
+            "Significant value contradictions detected. Final trust score: {:.0}%. \
+             The stated values in this conversation are internally incoherent.",
+            final_trust * 100.0
+        ))
+    } else if final_coherence < 0.5 {
+        ("drifting".to_string(), format!(
+            "Moderate value drift detected. Coherence dropped to {:.0}%. \
+             Some contradictions between stated values.",
+            final_coherence * 100.0
+        ))
+    } else {
+        ("coherent".to_string(), format!(
+            "Values appear consistent. Coherence: {:.0}%, Trust: {:.0}%.",
+            final_coherence * 100.0, final_trust * 100.0
+        ))
+    };
+
+    Assessment {
+        verdict,
+        summary,
+        influence_score,
+        final_coherence,
+        final_trust,
     }
 }

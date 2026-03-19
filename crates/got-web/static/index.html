@@ -200,6 +200,35 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
 .term-legend .legend-chip.active {
   background: rgba(88,166,255,0.12); border-color: #58a6ff; color: #58a6ff;
 }
+
+/* Verdict banner */
+.verdict-banner {
+  display: none; padding: 12px 24px;
+  border-bottom: 1px solid #30363d;
+  font-size: 14px; line-height: 1.5;
+}
+.verdict-banner.show { display: flex; align-items: center; gap: 16px; }
+.verdict-banner .verdict-icon { font-size: 28px; }
+.verdict-banner .verdict-label {
+  font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.verdict-banner .verdict-summary { font-size: 13px; color: #c9d1d9; }
+.verdict-banner .verdict-metrics { font-size: 11px; color: #8b949e; margin-top: 4px; }
+.verdict-manipulative { background: rgba(248,81,73,0.10); border-left: 4px solid #f85149; }
+.verdict-manipulative .verdict-label { color: #f85149; }
+.verdict-inconsistent { background: rgba(240,136,62,0.10); border-left: 4px solid #f0883e; }
+.verdict-inconsistent .verdict-label { color: #f0883e; }
+.verdict-drifting { background: rgba(210,153,34,0.10); border-left: 4px solid #d29922; }
+.verdict-drifting .verdict-label { color: #d29922; }
+.verdict-coherent { background: rgba(63,185,80,0.08); border-left: 4px solid #3fb950; }
+.verdict-coherent .verdict-label { color: #3fb950; }
+
+/* Speaker drift indicator in messages */
+.msg-drift {
+  font-size: 11px; color: #8b949e; margin-left: auto;
+}
+.msg-drift.high-drift { color: #f85149; }
+.msg-drift.med-drift { color: #f0883e; }
 </style>
 </head>
 <body>
@@ -231,6 +260,16 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
 
 <!-- Cumulative values strip -->
 <div class="term-legend" id="termLegend"></div>
+
+<!-- Verdict banner (shown after analysis) -->
+<div class="verdict-banner" id="verdictBanner">
+  <span class="verdict-icon" id="verdictIcon"></span>
+  <div>
+    <div class="verdict-label" id="verdictLabel"></div>
+    <div class="verdict-summary" id="verdictSummary"></div>
+    <div class="verdict-metrics" id="verdictMetrics"></div>
+  </div>
+</div>
 
 <div class="container">
   <!-- Chat panel -->
@@ -345,6 +384,7 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
       chatHeader.textContent = conversation.title || 'Conversation';
       renderConversation();
       renderTimeline();
+      renderVerdict();
       selectTurn(0);
     } catch (err) {
       console.error('Failed to load demo:', err);
@@ -375,6 +415,11 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
       html += '<div class="msg-meta">';
       html += '<span class="msg-speaker">' + esc(label) + '</span>';
       html += '<span class="msg-turn">Turn ' + idx + '</span>';
+      if (turn.speaker_drift > 0.01) {
+        const driftPct = (turn.speaker_drift * 100).toFixed(0);
+        const driftCls = turn.speaker_drift > 0.15 ? 'high-drift' : turn.speaker_drift > 0.08 ? 'med-drift' : '';
+        html += '<span class="msg-drift ' + driftCls + '" title="Semantic drift from this speaker\'s first message">\u0394' + driftPct + '%</span>';
+      }
       html += '</div>';
       html += '<div class="msg-text">' + esc(turn.text) + '</div>';
 
@@ -396,7 +441,7 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
       // New contradiction alerts
       if (turn.new_contradictions.length > 0) {
         turn.new_contradictions.forEach(c => {
-          const sev = c.severity >= 0.8 ? 'severe' : c.severity >= 0.5 ? 'moderate' : 'mild';
+          const sev = c.severity >= 0.5 ? 'severe' : c.severity >= 0.2 ? 'moderate' : 'mild';
           html += '<div class="contradiction-alert">';
           html += '<span class="alert-icon">\u26A0</span>';
           html += '<strong>' + sev.toUpperCase() + ':</strong> ';
@@ -469,6 +514,42 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
     else if (t >= 0.2) trustLabel.textContent = 'SUSPICIOUS';
     else trustLabel.textContent = 'UNTRUSTWORTHY';
     trustLabel.style.color = trustColour(t);
+  }
+
+  // ---- Verdict banner ----
+  function renderVerdict() {
+    const banner = document.getElementById('verdictBanner');
+    const icon = document.getElementById('verdictIcon');
+    const label = document.getElementById('verdictLabel');
+    const summary = document.getElementById('verdictSummary');
+    const metrics = document.getElementById('verdictMetrics');
+
+    if (!analysis || !analysis.assessment) {
+      banner.classList.remove('show');
+      return;
+    }
+
+    const a = analysis.assessment;
+    const v = a.verdict;
+
+    const icons = { manipulative: '\u{1F6A8}', inconsistent: '\u26A0\uFE0F', drifting: '\u{1F4C9}', coherent: '\u2705' };
+    icon.textContent = icons[v] || '\u2753';
+    label.textContent = v.toUpperCase();
+    summary.textContent = a.summary;
+
+    // Speaker metrics
+    let metricsHtml = 'Coherence: ' + (a.final_coherence * 100).toFixed(0) + '% | ' +
+      'Trust: ' + (a.final_trust * 100).toFixed(0) + '% | ' +
+      'Influence: ' + (a.influence_score * 100).toFixed(0) + '%';
+
+    if (analysis.speaker_summary) {
+      analysis.speaker_summary.forEach(s => {
+        metricsHtml += ' | ' + s.speaker + ' drift: ' + (s.semantic_drift * 100).toFixed(0) + '%';
+      });
+    }
+    metrics.innerHTML = metricsHtml;
+
+    banner.className = 'verdict-banner show verdict-' + v;
   }
 
   function trustColour(t) {
@@ -648,7 +729,7 @@ svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
     const newKeys = new Set(turn.new_contradictions.map(c => c.term_a + '|' + c.term_b));
     const sorted = [...turn.all_contradictions].sort((a, b) => b.severity - a.severity);
     el.innerHTML = sorted.map(c => {
-      const sev = c.severity >= 0.8 ? 'severe' : c.severity >= 0.5 ? 'moderate' : 'mild';
+      const sev = c.severity >= 0.5 ? 'severe' : c.severity >= 0.2 ? 'moderate' : 'mild';
       const isNew = newKeys.has(c.term_a + '|' + c.term_b);
       return '<div class="finding-card ' + sev + (isNew ? ' is-new' : '') + '">' +
         '<div class="finding-header">' +
