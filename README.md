@@ -6,9 +6,11 @@
 
 ## What Is This?
 
-Geometry of Trust (GoT) is a hackathon proof-of-concept that demonstrates a concrete technical pipeline for measuring, attesting, and independently verifying whether an AI model's internal representations encode specific value-relevant properties.
+Geometry of Trust (GoT) is a proof-of-concept that demonstrates a concrete technical pipeline for measuring, attesting, and independently verifying whether an AI model's internal representations encode specific value-relevant properties — and for detecting incoherence in value systems expressed through conversation.
 
 It works by exploiting a key finding from mechanistic interpretability research: value-relevant concepts have **measurable linear structure** in a transformer's residual stream. GoT formalises this with a **causal inner product** derived from the model's own unembedding matrix, trains linear probes under that geometry, and produces **Ed25519-signed attestations** that any independent party can reproduce and verify.
+
+A second analysis mode — **value incoherence detection** — requires zero training. It projects value-term embeddings into the causal geometry and detects contradictions (near-antonyms), redundancies (near-synonyms), and coherence scores from conversation transcripts, with per-turn accumulation and speaker-level influence tracking.
 
 ### The Core Idea
 
@@ -27,37 +29,40 @@ This causal inner product weights directions in the residual stream by how much 
 - **Causal**: Optional intervention-based proofs that probe directions *causally* influence model output, not just correlate with it
 - **Calibrated**: Platt scaling + ECE metric ensure confidence values are meaningful, not just ranked
 - **PKI-backed**: Agent certificates with expiry, revocation (CRL), and key rotation ceremonies
+- **Zero-training coherence**: Value incoherence detection needs only the unembedding matrix — no probes, no labels, no SGD
 
 ## Architecture
 
 ```
-got-core        Layer 0 — Core types, causal geometry (Gram matrix, inner product)
-  ↑       ↑
-got-probe   got-attest    Layer 1–2 — Probe training/inference, attestation signing
-  ↑       ↑
-got-wire    got-store     Layer 3 — Wire protocol for agent exchange, attestation storage
-  ↑       ↑
-got-enclave               Layer 4 — Hardware enclave boundary (TEE mock for PoC)
-  ↑
-got-cli                   Layer 5 — CLI binary orchestrating the full pipeline
+got-core            Layer 0 — Core types, causal geometry (Gram matrix, inner product)
+  ↑           ↑
+got-probe     got-attest       Layer 1–2 — Probe training/inference, attestation signing
+  ↑           ↑
+got-wire      got-store        Layer 3 — Wire protocol for agent exchange, attestation storage
+  ↑           ↑
+got-enclave   got-incoherence  Layer 4 — Enclave boundary, coherence analysis
+  ↑           ↑
+got-cli       got-web          Layer 5 — CLI and web server
 ```
 
 | Crate | Purpose |
 |---|---|
-| `got-core` | `CausalGeometry`, `GeometricAttestation`, `LayerActivation`, precision types |
-| `got-probe` | Linear probe training (SGD under causal IP), Platt calibration, ECE metric, inference, causal checks |
-| `got-attest` | Attestation assembly, Ed25519 signing/verification, Merkle roots |
+| `got-core` | `CausalGeometry`, `GeometricAttestation`, `LayerActivation`, precision types, drift computation |
+| `got-probe` | Linear probe training (SGD under causal IP), Platt calibration, ECE metric, inference, causal intervention checks, measurement hooks and sidecar |
+| `got-attest` | Attestation assembly, Ed25519 signing/verification, Merkle roots, causal consistency validation |
 | `got-wire` | Framed wire protocol, exchange envelopes, chain verification, trust registry, PKI certificates, CRL |
-| `got-store` | Attestation persistence (in-memory and on-disk), audit reports |
-| `got-enclave` | TEE abstraction — signing keys never leave the enclave boundary |
-| `got-cli` | CLI with `keygen`, `train`, `attest`, `verify`, `checkpoint`, `drift`, `calibration-report`, `issue-cert`, `revoke-cert`, `rotate-key` subcommands |
+| `got-store` | Attestation persistence (in-memory and on-disk with atomic writes), audit reports |
+| `got-enclave` | TEE abstraction — signing keys never leave the enclave boundary (software mock for PoC) |
+| `got-incoherence` | Zero-training coherence analysis: pairwise causal cosines, contradiction/redundancy detection, SVG heatmap and chord diagram generation |
+| `got-cli` | CLI with `keygen`, `train`, `attest`, `verify`, `checkpoint`, `drift`, `calibration-report`, `issue-cert`, `revoke-cert`, `rotate-key`, `coherence-check` subcommands |
+| `got-web` | Axum web server with D3.js frontend for conversational incoherence visualisation; supports real model (GPT-2) and synthetic demo modes |
 
 ## Getting Started
 
 ### Prerequisites
 
 - **Rust** (stable, 2021 edition) — for building the core pipeline
-- **Python 3.8+** with `torch` and `transformers` — for extracting activations from a model
+- **Python 3.10+** with `torch` and `transformers` — for extracting activations from a model
 
 ### Build
 
@@ -77,7 +82,7 @@ cargo test
 cargo test --test integration
 ```
 
-The integration tests exercise the full pipeline — geometry computation, probe training, attestation, verification, chaining, drift detection, and causal intervention — all with synthetic data, no GPU required.
+The integration tests (68 tests) exercise the full pipeline — geometry computation, probe training, attestation, verification, chaining, drift detection, causal intervention, measurement hooks, sidecar monitoring, and distribution shift detection — all with synthetic data, no GPU required.
 
 ### End-to-End Pipeline (With a Real Model)
 
@@ -243,6 +248,58 @@ cargo run --release -p got-cli -- rotate-key \
 
 The trust registry validates certificates against configured CA keys, checks expiry on every exchange, and rejects agents whose certificates appear in a loaded CRL.
 
+### Value Coherence Analysis
+
+Detect geometric contradictions in a set of value terms — no training required. This uses only the causal geometry of the model's unembedding matrix.
+
+#### CLI
+
+```bash
+# Analyse a value system (text output)
+cargo run --release -p got-cli -- coherence-check \
+    --embeddings data/demo/embeddings.json \
+    --unembedding data/demo/model.gotue \
+    --values innovation,risk-aversion,accountability,transparency
+
+# Generate an SVG heatmap of pairwise causal cosines
+cargo run --release -p got-cli -- coherence-check \
+    --embeddings data/demo/embeddings.json \
+    --unembedding data/demo/model.gotue \
+    --format svg-heatmap
+
+# Generate an SVG chord diagram
+cargo run --release -p got-cli -- coherence-check \
+    --embeddings data/demo/embeddings.json \
+    --unembedding data/demo/model.gotue \
+    --format svg-chord
+```
+
+Output formats: `text` (default), `json`, `svg-heatmap`, `svg-chord`.
+
+#### Web Visualiser
+
+`got-web` provides an axum server with a D3.js single-page frontend for interactive conversational incoherence analysis.
+
+```bash
+# Real model mode (GPT-2 unembedding + vocabulary)
+cargo run --release -p got-web -- \
+    --geometry data/models/gpt2.gotact \
+    --vocab data/models/gpt2-vocab.json
+
+# Synthetic demo mode (compiled-in 32-d embeddings, for development only)
+cargo run --release -p got-web -- --synthetic
+```
+
+**Endpoints:**
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Single-page D3.js visualisation |
+| `GET` | `/api/demo-conversation` | Returns a pre-built conversation with per-message embeddings |
+| `POST` | `/api/conversation/analyse` | Analyses a conversation: per-turn value detection, coherence scores, contradiction tracking, speaker influence assessment |
+
+The analysis endpoint projects message embeddings against value terms using the causal inner product, accumulates detected values turn by turn, and returns per-turn coherence, speaker drift, influence scores, and an overall manipulation assessment.
+
 ## Trust Tiers
 
 The attestation schema supports three progressive levels of trust:
@@ -253,9 +310,51 @@ The attestation schema supports three progressive levels of trust:
 | **Tier 2 — Consistency** | v2 | Signature + parent chain hash + geometry drift bounds + coverage flags |
 | **Tier 3 — Reproduction** | v3 | Full re-extraction + re-probing + causal intervention scores + bitwise match |
 
+## Security
+
+A 23-item security audit identified 12 critical/high issues, all mitigated:
+
+- `verify()` returns `Err(SignatureInvalid)` instead of the `Ok(false)` trap
+- Trust registry requires SHA-256 integrity pin on load
+- Nonce generation uses `OsRng` (not `thread_rng`)
+- `from_raw_gram()` validates NaN, Infinity, and symmetry
+- `geometry_hash()` includes epsilon in the hash
+- `FileStore` uses atomic writes via `tempfile` (no TOCTOU)
+- Timestamps reject >300s future offset
+- Chain verification supports key rotation via `&[VerifyingKey]`
+- Exchange envelopes carry verified flag with atomic `from_bytes_verified()`
+- Array lengths bounded (max 1024 layers, 65536 total readings)
+- `validate_causal_consistency()` checks causal score integrity
+
+See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) for the full audit.
+
+## Python Scripts
+
+The `scripts/` directory contains tools for model activation extraction and analysis:
+
+| Script | Purpose |
+|---|---|
+| `extract_activations.py` | Extract residual-stream activations and unembedding matrix from any HuggingFace model |
+| `extract_gpt2_demo.py` | Extract GPT-2 specific data for the demo pipeline |
+| `build_gpt2_demo.py` | Build the complete GPT-2 demo dataset (activations, embeddings, vocabulary) |
+| `save_vocab.py` | Save a model's vocabulary as JSON |
+| `analyse_gpt2_geometry.py` | Analyse the geometric properties of GPT-2's causal inner product |
+| `analyse_centering.py` | Analyse embedding centering effects |
+| `analyse_debiasing.py` | Analyse debiasing in the causal geometry |
+| `check_drift.py` | Check geometry drift between model versions |
+| `trace_coherence.py` | Trace coherence scores through a conversation |
+| `inspect_terms.py` | Inspect value-term embeddings in the causal space |
+| `inspect_conv.py` | Inspect conversation embeddings |
+| `test_api.py` | Test the web API endpoints |
+| `test_real_api.py` | End-to-end API tests with real model data |
+| `test_real_models.py` | Test against real model weights |
+| `test_zscore.py` | Test z-score thresholding for value detection |
+
+See [scripts/README.md](scripts/README.md) for activation extraction details and binary format specs.
+
 ## What This PoC Does *Not* Do
 
-This project deliberately proves only the **technical substrate** — that the causal inner product is computable, probe readings are deterministic, and attestations are independently reproducible. It does not address:
+This project proves the **technical substrate** — that the causal inner product is computable, probe readings are deterministic, attestations are independently reproducible, and value incoherence is geometrically detectable. It does not address:
 
 - **Real TEE integration** — the enclave layer is a software mock; production deployment requires SGX/TDX/SEV hardware
 - **Corpus curation** — who decides what concepts to probe for
@@ -263,12 +362,17 @@ This project deliberately proves only the **technical substrate** — that the c
 - **Coverage semantics** — whether the probed dimensions are sufficient
 - **Institutional governance** — who has standing to adjudicate trust
 - **Platt calibration ground truth** — the calibration pipeline is functional but needs real-world labelled datasets for meaningful ECE scores
+- **Threshold calibration** — coherence detection thresholds need tuning on real conversational data
 
 Those are the hard problems. This is the plumbing that proves the hard problems are worth solving.
 
 ## Documentation
 
 - [PLAN.md](PLAN.md) — Full implementation plan with mathematical details
+- [PRODUCTION.md](PRODUCTION.md) — Phase planning for real model geometry and threshold calibration
+- [REFACTOR.md](REFACTOR.md) — Known issues and refactoring notes (web demo dimension mismatch)
+- [SECURITY_AUDIT.md](SECURITY_AUDIT.md) — 23-item security review with mitigations
+- [ISSUES.md](ISSUES.md) — Tracked specification issues and hygiene items
 - [scripts/README.md](scripts/README.md) — Activation extraction guide and binary format specs
 - [docs/architecture-layers.md](docs/architecture-layers.md) — Layer-by-layer architecture
 - [docs/architecture-code.md](docs/architecture-code.md) — Crate dependency graph and internal structure
@@ -278,6 +382,13 @@ Those are the hard problems. This is the plumbing that proves the hard problems 
 - [docs/architecture-agent-protocol.md](docs/architecture-agent-protocol.md) — Agent-to-agent attestation protocol
 - [docs/architecture-motherboard.md](docs/architecture-motherboard.md) — Motherboard-style trust and comms diagrams
 
+## Project Stats
+
+- **9 crates** | **20+ modules** | **8,500+ lines of Rust**
+- **255+ unit tests** | **68 integration tests** | **0 compiler warnings**
+- **15 Python scripts** for model extraction and analysis
+- **12/12 security issues mitigated** (critical and high severity)
+
 ## License
 
-This is a hackathon proof-of-concept.
+This is a proof-of-concept.
