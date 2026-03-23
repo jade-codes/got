@@ -1,0 +1,69 @@
+/* base.css — shared theme, reset, layout, common components */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: #0d1117; color: #c9d1d9;
+  height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+}
+
+/* Header */
+header {
+  background: #161b22; border-bottom: 1px solid #30363d;
+  padding: 14px 24px; display: flex; align-items: center; gap: 16px;
+}
+header h1 { font-size: 18px; font-weight: 600; color: #f0f6fc; }
+header .subtitle { font-size: 13px; color: #8b949e; }
+.mode-banner { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; margin-left: 12px; letter-spacing: 0.05em; }
+.mode-synthetic { background: #3d2200; color: #f0883e; }
+.mode-live { background: #1a3d1a; color: #56d364; }
+
+/* Session indicator */
+.session-indicator {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #8b949e; margin-left: auto;
+}
+.session-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #484f58;
+}
+.session-dot.active { background: #3fb950; }
+
+/* Main layout */
+.container { display: flex; flex: 1; overflow: hidden; }
+
+/* Empty state */
+.empty-state {
+  text-align: center; padding: 60px 20px; color: #484f58;
+}
+.empty-state h2 { font-size: 18px; margin-bottom: 8px; color: #8b949e; }
+.empty-state p { font-size: 13px; }
+
+/* Loading spinner */
+.spinner {
+  display: none; width: 24px; height: 24px;
+  border: 3px solid #30363d; border-top-color: #58a6ff;
+  border-radius: 50%; animation: spin 0.6s linear infinite;
+  margin: 20px auto;
+}
+.spinner.show { display: block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Tooltip */
+.heatmap-tooltip {
+  position: absolute; padding: 6px 10px; background: #21262d;
+  border: 1px solid #30363d; border-radius: 6px; font-size: 12px;
+  color: #c9d1d9; pointer-events: none; opacity: 0; z-index: 20;
+}
+
+/* SVG text baseline */
+svg text { font-family: 'Segoe UI', system-ui, sans-serif; }
+
+/* Shared value chip styles */
+.value-chip {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 500;
+  background: #21262d; border: 1px solid #30363d; color: #8b949e;
+}
+.value-chip.new { background: rgba(88,166,255,0.12); border-color: #58a6ff; color: #58a6ff; }
+.value-chip.negative { background: rgba(248,81,73,0.08); border-color: rgba(248,81,73,0.4); color: #f85149; }
+.value-chip small { opacity: 0.7; font-size: 10px; }

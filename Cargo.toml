@@ -9,6 +9,7 @@ members = [
     "crates/got-store",
     "crates/got-incoherence",
     "crates/got-web",
+    "crates/got-proxy",
 ]
 resolver = "2"
 
@@ -25,6 +26,7 @@ got-wire = { path = "crates/got-wire" }
 got-enclave = { path = "crates/got-enclave" }
 got-store = { path = "crates/got-store" }
 got-incoherence = { path = "crates/got-incoherence" }
+got-proxy = { path = "crates/got-proxy" }
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 sha2 = "0.10"
 

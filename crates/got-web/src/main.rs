@@ -33,7 +33,9 @@ use got_core::UnembeddingMatrix;
 use got_incoherence::coherence::CoherenceConfig;
 use got_incoherence::embeddings::{EmbeddingSource, PrecomputedEmbeddings, UnembeddingLookup};
 use got_web::AppState;
+use got_web::proxy_api::ProxyState;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::ServeDir;
 
 // ---------------------------------------------------------------------------
 // CLI arguments
@@ -63,6 +65,10 @@ struct Args {
     /// For development/testing only — not credible for real analysis.
     #[arg(long)]
     synthetic: bool,
+
+    /// Path to static files directory (default: auto-detected relative to binary).
+    #[arg(long)]
+    static_dir: Option<String>,
 }
 
 // Default value terms to look up in any model's vocabulary.
@@ -74,15 +80,6 @@ const VALUE_TERMS: &[&str] = &[
     "oppression", "resilience", "responsibility", "secrecy",
     "tradition", "transparency", "truthfulness", "wisdom",
 ];
-
-/// Serve the single-page frontend.
-async fn index() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("../static/index.html"),
-    )
-}
 
 /// Return the demo conversation (pre-built scenario with message embeddings).
 async fn demo_conversation(
@@ -131,6 +128,7 @@ fn build_synthetic_state() -> AppState {
             severity_scale: None,
         },
         introduction_threshold: 0.0,
+        proxy: ProxyState::new(),
     }
 }
 
@@ -299,6 +297,7 @@ fn build_real_state(
             severity_scale: Some(0.10),
         },
         introduction_threshold: 1.0,
+        proxy: ProxyState::new(),
     }
 }
 
@@ -334,10 +333,30 @@ async fn main() {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // Resolve static directory: CLI arg > crate-relative > cwd
+    let static_dir = args.static_dir.unwrap_or_else(|| {
+        // Try crate-relative path first (works during development)
+        let crate_relative = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static");
+        if crate_relative.exists() {
+            crate_relative.to_string_lossy().to_string()
+        } else {
+            "static".to_string()
+        }
+    });
+    eprintln!("Serving static files from: {static_dir}");
+
     let app = Router::new()
-        .route("/", get(index))
         .route("/api/demo-conversation", get(demo_conversation))
         .route("/api/conversation/analyse", post(api::analyse_conversation))
+        .route("/api/embed", post(got_web::embed_api::embed_text))
+        .route("/api/chat", post(got_web::chat_api::chat))
+        // Proxy endpoints
+        .route("/api/proxy/session", post(got_web::proxy_api::create_session))
+        .route("/api/proxy/session/:id/observe", post(got_web::proxy_api::observe))
+        .route("/api/proxy/session/:id/status", get(got_web::proxy_api::session_status))
+        .route("/api/proxy/session/:id/history", get(got_web::proxy_api::deviation_history))
+        .route("/api/proxy/session/:id/snapshot", post(got_web::proxy_api::snapshot))
+        .fallback_service(ServeDir::new(&static_dir))
         .layer(cors)
         .with_state(state);
 

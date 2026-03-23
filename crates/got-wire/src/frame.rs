@@ -20,6 +20,8 @@ pub enum MessageType {
     VerifyRsp = 0x04,
     ChainReq = 0x05,
     ChainRsp = 0x06,
+    BehavioralExchangeReq = 0x10,
+    BehavioralExchangeRsp = 0x11,
     Error = 0xFF,
 }
 
@@ -32,6 +34,8 @@ impl MessageType {
             0x04 => Ok(Self::VerifyRsp),
             0x05 => Ok(Self::ChainReq),
             0x06 => Ok(Self::ChainRsp),
+            0x10 => Ok(Self::BehavioralExchangeReq),
+            0x11 => Ok(Self::BehavioralExchangeRsp),
             0xFF => Ok(Self::Error),
             _ => Err(WireError::UnknownMessageType(b)),
         }

@@ -10,6 +10,7 @@
 // transports.  A real deployment would plug in `snow` + TCP.
 // ---------------------------------------------------------------------------
 
+pub mod behavioral;
 pub mod certificate;
 pub mod chain;
 pub mod envelope;

@@ -1,5 +1,8 @@
 pub mod api;
+pub mod chat_api;
 pub mod demo;
+pub mod embed_api;
+pub mod proxy_api;
 
 use std::collections::HashMap;
 
@@ -20,4 +23,6 @@ pub struct AppState {
     pub default_config: CoherenceConfig,
     /// Minimum z-score to introduce a value into the cumulative set.
     pub introduction_threshold: f32,
+    /// Proxy session state for closed-source model monitoring.
+    pub proxy: proxy_api::ProxyState,
 }
