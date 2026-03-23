@@ -102,10 +102,11 @@ async function handleSend() {
   try {
     await ensureSession();
 
-    // Show user message in chat
+    // Show user message in chat, observe as "user" (context only, no deviation)
     const userEmbedResult = await embedText(text);
+    const userObs = await proxyObserve(sessionId, userEmbedResult.embedding, 'user');
     allMessages.push({ speaker: 'user', text, embedding: userEmbedResult.embedding });
-    addMessageToChat(text, 'user', null, null, 'You');
+    addMessageToChat(text, 'user', userObs.detected_values, userEmbedResult, 'You');
 
     if (hasLLM) {
       // Send to LLM
@@ -132,9 +133,9 @@ async function handleSend() {
 
       conversationHistory.push({ role: 'assistant', content: aiText });
 
-      // Embed the AI response and observe through proxy
+      // Embed the AI response and observe through proxy as "assistant"
       const embedResult = await embedText(aiText);
-      const obsResult = await proxyObserve(sessionId, embedResult.embedding);
+      const obsResult = await proxyObserve(sessionId, embedResult.embedding, 'assistant');
       observationCount = obsResult.observation_count;
 
       // Show AI response with detected values
@@ -150,8 +151,8 @@ async function handleSend() {
       updateTopValues(obsResult.detected_values);
 
     } else {
-      // No LLM configured — just observe the user's own message (original behavior)
-      const obsResult = await proxyObserve(sessionId, userEmbedResult.embedding);
+      // No LLM configured — user message already observed above as "user"
+      const obsResult = userObs;
       observationCount = obsResult.observation_count;
 
       // Update the user message with detected values
@@ -226,23 +227,23 @@ async function loadDemo() {
     document.getElementById('chatHeader').textContent = conversation.title || 'Conversation';
 
     // Update mode banner
-    const modeBanner = document.getElementById('modeBanner');
-
     // Clear state
     allMessages = [];
     deviationHistory = [];
     chatBody.innerHTML = '';
     document.getElementById('emptyChat')?.remove();
 
-    // Replay each message through the proxy
+    // Replay each message through the proxy with speaker attribution
     for (const msg of conversation.messages) {
-      const obsResult = await proxyObserve(sessionId, msg.embedding);
+      // Map demo speaker IDs: "user" stays "user", anything else is the model
+      const proxySpeaker = msg.speaker === 'user' ? 'user' : 'assistant';
+      const obsResult = await proxyObserve(sessionId, msg.embedding, proxySpeaker);
       observationCount = obsResult.observation_count;
 
       allMessages.push({ speaker: msg.speaker, text: msg.text, embedding: msg.embedding });
 
-      const speaker = speakerMap[msg.speaker];
-      const label = speaker ? speaker.label : msg.speaker;
+      const speakerInfo = speakerMap[msg.speaker];
+      const label = speakerInfo ? speakerInfo.label : msg.speaker;
       addMessageToChat(msg.text, msg.speaker, obsResult.detected_values, null, label);
 
       if (obsResult.deviation) {
@@ -252,15 +253,6 @@ async function loadDemo() {
 
     // Run full coherence analysis
     await runCoherenceAnalysis();
-
-    // Update mode from analysis
-    if (analysis && analysis.mode && analysis.mode !== 'synthetic-demo') {
-      modeBanner.textContent = 'LIVE: ' + analysis.mode.toUpperCase();
-      modeBanner.className = 'mode-banner mode-live';
-    } else {
-      modeBanner.textContent = 'SYNTHETIC DEMO';
-      modeBanner.className = 'mode-banner mode-synthetic';
-    }
 
     // Render timeline + verdict from coherence analysis
     if (analysis) {
@@ -326,7 +318,9 @@ function selectTurn(idx) {
   if (sel) sel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
   updateScore(turn.coherence_score);
-  updateTrust(turn.trust_score);
+  // Composite trust: server coherence-trust × deviation conformity × manifold health
+  const compositeTrust = computeCompositeTrust(turn.trust_score, latestDeviation);
+  updateTrust(compositeTrust);
   updateTermLegend(turn);
   updateTimelineHighlight(idx, analysis);
 
@@ -400,6 +394,31 @@ function updateTermLegend(turn) {
   });
 }
 
+// ---- Composite trust ----
+// Trust = coherence_stability × baseline_conformity × manifold_health
+// Each factor in [0, 1]. Any one going to zero tanks trust.
+
+let latestDeviation = null; // most recent deviation from proxy
+
+function computeCompositeTrust(coherenceTrust, deviation) {
+  // Factor 1: coherence stability (from server — coherence × drift penalty)
+  const coherenceFactor = coherenceTrust;
+
+  // Factor 2: baseline conformity (1 - deviation severity)
+  let baselineFactor = 1.0;
+  if (deviation && deviation.baseline_sufficient) {
+    baselineFactor = Math.max(0, 1.0 - deviation.combined_score);
+  }
+
+  // Factor 3: manifold health (1 = on-manifold, 0 = off-manifold)
+  let manifoldFactor = 1.0;
+  if (deviation && deviation.manifold_density_score !== undefined) {
+    manifoldFactor = Math.max(0, 1.0 - deviation.manifold_density_score);
+  }
+
+  return (coherenceFactor * baselineFactor * manifoldFactor);
+}
+
 // ---- Deviation display ----
 
 function updateManifoldBadge(deviation) {
@@ -411,10 +430,12 @@ function updateManifoldBadge(deviation) {
     label.textContent = 'MANIFOLD';
     return;
   }
-  const score = deviation.manifold_density_score;
-  badge.textContent = score < 0.01 ? 'ON' : 'OFF';
-  badge.style.color = score < 0.01 ? '#3fb950' : '#f85149';
-  label.textContent = 'MANIFOLD';
+  // Continuous: show the deviation combined_score as a manifold health indicator
+  // Lower deviation = healthier
+  const health = Math.max(0, 1.0 - deviation.combined_score);
+  badge.textContent = health.toFixed(2);
+  badge.style.color = health >= 0.7 ? '#3fb950' : health >= 0.4 ? '#d29922' : '#f85149';
+  label.textContent = health >= 0.7 ? 'HEALTHY' : health >= 0.4 ? 'DRIFTING' : 'ANOMALOUS';
 }
 
 function updateDeviationDisplay(deviation) {
@@ -424,6 +445,7 @@ function updateDeviationDisplay(deviation) {
   const baselineEl = document.getElementById('baselineProgress');
 
   obsEl.textContent = observationCount;
+  if (deviation) latestDeviation = deviation;
   updateManifoldBadge(deviation);
 
   if (!deviation) {
@@ -431,9 +453,9 @@ function updateDeviationDisplay(deviation) {
     badge.style.color = '#8b949e';
     verdict.textContent = observationCount > 0 ? 'Building Baseline' : 'No Session';
     verdict.className = 'verdict-pill building';
-    if (observationCount > 0 && observationCount < 20) {
-      const pct = Math.min(100, (observationCount / 20) * 100);
-      baselineEl.innerHTML = observationCount + '/20 ' +
+    if (observationCount > 0 && observationCount < 5) {
+      const pct = Math.min(100, (observationCount / 5) * 100);
+      baselineEl.innerHTML = observationCount + '/5 ' +
         '<span class="progress-bar"><span class="progress-fill" style="width:' + pct + '%"></span></span>';
       baselineEl.style.display = '';
     } else {
@@ -456,7 +478,7 @@ function updateDeviationDisplay(deviation) {
 function updateSignals(deviation) {
   const panel = document.getElementById('tab-deviation');
   if (!deviation) {
-    panel.innerHTML = '<div class="empty-state"><p>Waiting for baseline (20 observations required)</p></div>';
+    panel.innerHTML = '<div class="empty-state"><p>Waiting for baseline (5 model responses required)</p></div>';
     return;
   }
 

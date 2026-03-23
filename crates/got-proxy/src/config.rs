@@ -73,7 +73,7 @@ impl Default for ProxyConfig {
             threshold_within: 0.3,
             threshold_deviated: 0.6,
 
-            min_observations_for_detection: 20,
+            min_observations_for_detection: 5,
 
             value_detection_threshold: 0.0,
             max_values_per_observation: 10,

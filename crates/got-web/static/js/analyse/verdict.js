@@ -19,10 +19,10 @@ export function updateTrust(t) {
   const trustLabel = document.getElementById('trustLabel');
   trustValue.textContent = t.toFixed(2);
   trustValue.style.color = trustColour(t);
-  if (t >= 0.8) trustLabel.textContent = 'TRUSTWORTHY';
-  else if (t >= 0.5) trustLabel.textContent = 'UNCERTAIN';
-  else if (t >= 0.2) trustLabel.textContent = 'SUSPICIOUS';
-  else trustLabel.textContent = 'UNTRUSTWORTHY';
+  if (t >= 0.7) trustLabel.textContent = 'TRUSTED';
+  else if (t >= 0.4) trustLabel.textContent = 'UNCERTAIN';
+  else if (t >= 0.15) trustLabel.textContent = 'SUSPICIOUS';
+  else trustLabel.textContent = 'UNTRUSTED';
   trustLabel.style.color = trustColour(t);
 }
 

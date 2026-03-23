@@ -305,8 +305,6 @@ async fn main() {
     let args = Args::parse();
 
     let state = if args.synthetic {
-        eprintln!("*** SYNTHETIC DEMO MODE — NOT REAL MODEL DATA ***");
-        eprintln!("This mode uses hand-crafted 32-d embeddings for development only.");
         build_synthetic_state()
     } else if let Some(ref gotue_path) = args.geometry {
         let vocab_path = args.vocab.as_deref()

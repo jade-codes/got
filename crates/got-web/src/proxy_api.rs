@@ -66,11 +66,20 @@ pub struct CreateSessionResponse {
 #[derive(Debug, Deserialize)]
 pub struct ObserveRequest {
     pub embedding: Vec<f32>,
+    /// Speaker ID: "assistant" for the model, "user" for the human.
+    /// Defaults to "assistant" if omitted (backward compatible).
+    #[serde(default = "default_speaker")]
+    pub speaker: String,
+}
+
+fn default_speaker() -> String {
+    "assistant".to_string()
 }
 
 #[derive(Debug, Serialize)]
 pub struct ObserveResponse {
     pub observation_count: u64,
+    pub speaker: String,
     pub detected_values: Vec<DetectedValueResponse>,
     pub deviation: Option<DeviationResponse>,
 }
@@ -261,11 +270,12 @@ pub async fn observe(
         .ok_or_else(|| proxy_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
 
     let result = session
-        .observe(&req.embedding)
+        .observe(&req.embedding, &req.speaker)
         .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("observe: {e}")))?;
 
     Ok(Json(ObserveResponse {
         observation_count: result.observation_count,
+        speaker: result.speaker.clone(),
         detected_values: result
             .detected_values
             .iter()

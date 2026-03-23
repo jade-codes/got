@@ -50,11 +50,11 @@ export async function createProxySession(targetModelId, sessionId) {
   return res.json();
 }
 
-export async function proxyObserve(sessionId, embedding) {
+export async function proxyObserve(sessionId, embedding, speaker = 'assistant') {
   const res = await fetch(`/api/proxy/session/${sessionId}/observe`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ embedding }),
+    body: JSON.stringify({ embedding, speaker }),
   });
   return res.json();
 }

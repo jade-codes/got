@@ -72,10 +72,10 @@ fn full_proxy_pipeline() {
         emb[0] = angle.cos();
         emb[1] = angle.sin();
         emb[2] = 0.3;
-        let result = session.observe(&emb).unwrap();
+        let result = session.observe(&emb, "assistant").unwrap();
         assert_eq!(result.observation_count, i + 1);
-        // Before min_observations, deviation should be None
-        if i < 19 {
+        // Before min_observations (5), deviation should be None
+        if i < 4 {
             assert!(result.deviation.is_none());
         }
     }
@@ -93,7 +93,7 @@ fn full_proxy_pipeline() {
 
     // Phase 2: More consistent observations (should stay within baseline)
     for _ in 0..5 {
-        let result = session.observe(&[0.5, 0.5, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        let result = session.observe(&[0.5, 0.5, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0], "assistant").unwrap();
         if let Some(dev) = &result.deviation {
             assert!(dev.baseline_sufficient);
             assert_eq!(dev.verdict, DeviationVerdict::WithinBaseline);
@@ -159,8 +159,8 @@ fn value_space_hash_determinism() {
         vec![0.5, 0.5, 0.0, 0.0],
     ];
     for obs in &observations {
-        s1.observe(obs).unwrap();
-        s2.observe(obs).unwrap();
+        s1.observe(obs, "assistant").unwrap();
+        s2.observe(obs, "assistant").unwrap();
     }
 
     // Value space hashes should be identical

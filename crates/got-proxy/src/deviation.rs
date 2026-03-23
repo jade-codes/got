@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn insufficient_baseline() {
-        let baseline = make_baseline(5);
+        let baseline = make_baseline(3);
         let config = ProxyConfig::default();
 
         let current: HashMap<String, f64> =

@@ -238,3 +238,4 @@ __marimo__/
 .streamlit/secrets.toml
 # Large model binary files (exceed GitHub 100MB limit)
 data/models/*.gotue
+node_modules/

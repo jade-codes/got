@@ -35,10 +35,12 @@ pub struct DetectedValue {
 pub struct ObservationResult {
     /// Values detected in this observation.
     pub detected_values: Vec<DetectedValue>,
-    /// Current deviation report (None if baseline insufficient).
+    /// Current deviation report (None if baseline insufficient or non-model speaker).
     pub deviation: Option<DeviationReport>,
-    /// Current observation count.
+    /// Current observation count (model observations only).
     pub observation_count: u64,
+    /// The speaker who produced this observation.
+    pub speaker: String,
 }
 
 /// Proxy session status summary.
@@ -81,10 +83,13 @@ pub struct ProxySession<S: ValueSpaceStore, E: EmbeddingSource> {
     cumulative_drift: f64,
     /// Deviation history.
     deviation_history: Vec<DeviationReport>,
-    /// Stored activation vectors for manifold analysis.
+    /// Stored activation vectors for manifold analysis (model speaker only).
     activation_history: Vec<Vec<f32>>,
     /// Per-term log-densities from the most recent snapshot. Empty before first snapshot.
     latest_term_densities: HashMap<String, f32>,
+    /// Lightweight user context: which values has the user expressed, and how strongly.
+    /// Not used for deviation detection or trust — purely descriptive context.
+    user_value_profile: HashMap<String, f64>,
 }
 
 impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
@@ -117,37 +122,104 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
             deviation_history: Vec::new(),
             activation_history: Vec::new(),
             latest_term_densities: HashMap::new(),
+            user_value_profile: HashMap::new(),
         })
     }
 
-    /// Observe a single output from the closed-source model.
+    /// Observe a single message from the conversation.
     ///
-    /// `output_embedding` is the output text embedded through the reference
-    /// model's geometry. The session detects values, updates the value space,
-    /// and runs deviation detection.
-    pub fn observe(&mut self, output_embedding: &[f32]) -> Result<ObservationResult, ProxyError> {
-        // Store activation for manifold analysis
-        self.activation_history.push(output_embedding.to_vec());
+    /// `speaker` identifies who produced the message:
+    /// - `"assistant"` (or any model ID): full pipeline — value space, deviation,
+    ///   manifold tracking, activation history. This is the monitored subject.
+    /// - Any other speaker (e.g. `"user"`): lightweight value detection only.
+    ///   Accumulates a context profile of what the user is expressing, but no
+    ///   deviation baseline, no trust computation, no contradiction flagging.
+    pub fn observe(
+        &mut self,
+        output_embedding: &[f32],
+        speaker: &str,
+    ) -> Result<ObservationResult, ProxyError> {
+        // Step 1: Detect values (same for all speakers)
+        let (detected, scores) = self.detect_values(output_embedding);
 
-        // Detect values: project output against each term embedding using causal cosine
+        // Step 2: Speaker-dependent processing
+        let is_model = speaker == "assistant" || speaker == &self.target_model_id;
+
+        if is_model {
+            // Model speaker: full pipeline
+            self.activation_history.push(output_embedding.to_vec());
+
+            self.value_space
+                .update_terms(&scores, self.config.ewma_alpha as f64);
+
+            let pairwise_cosines = self.compute_pairwise(&scores);
+            self.value_space.update_pairwise(&pairwise_cosines);
+
+            let manifold_density_score = self.compute_manifold_density_signal();
+
+            let deviation_report = detect_deviation(
+                &scores,
+                &pairwise_cosines,
+                &self.value_space,
+                &self.config,
+                manifold_density_score,
+            );
+
+            let deviation = if deviation_report.baseline_sufficient {
+                self.cumulative_drift += deviation_report.profile_drift;
+                self.latest_deviation = Some(deviation_report.clone());
+                self.deviation_history.push(deviation_report.clone());
+                Some(deviation_report)
+            } else {
+                None
+            };
+
+            Ok(ObservationResult {
+                detected_values: detected,
+                deviation,
+                observation_count: self.value_space.observation_count,
+                speaker: speaker.to_string(),
+            })
+        } else {
+            // Non-model speaker: lightweight context tracking
+            for (term, &score) in &scores {
+                let entry = self.user_value_profile.entry(term.clone()).or_insert(0.0);
+                // EWMA update for the user profile
+                *entry = *entry * (1.0 - self.config.ewma_alpha as f64)
+                    + score * self.config.ewma_alpha as f64;
+            }
+
+            Ok(ObservationResult {
+                detected_values: detected,
+                deviation: None,
+                observation_count: self.value_space.observation_count,
+                speaker: speaker.to_string(),
+            })
+        }
+    }
+
+    /// Detect values in an embedding: project against all terms, z-score, threshold.
+    fn detect_values(&self, embedding: &[f32]) -> (Vec<DetectedValue>, HashMap<String, f64>) {
         let mut detected = Vec::new();
         let mut scores = HashMap::new();
 
-        // Compute raw projections against all known terms
         let mut raw_scores: Vec<(String, f64)> = Vec::new();
         for term in self.embedding_source.available_terms() {
             if let Some(term_emb) = self.embedding_source.embed(&term) {
-                match causal_cosine(output_embedding, &term_emb, &self.geometry) {
+                match causal_cosine(embedding, &term_emb, &self.geometry) {
                     Ok(cos) => raw_scores.push((term, cos as f64)),
                     Err(_) => continue,
                 }
             }
         }
 
-        // Z-score the raw projections
         if !raw_scores.is_empty() {
-            let mean: f64 = raw_scores.iter().map(|(_, s)| s).sum::<f64>() / raw_scores.len() as f64;
-            let variance: f64 = raw_scores.iter().map(|(_, s)| (s - mean).powi(2)).sum::<f64>()
+            let mean: f64 =
+                raw_scores.iter().map(|(_, s)| s).sum::<f64>() / raw_scores.len() as f64;
+            let variance: f64 = raw_scores
+                .iter()
+                .map(|(_, s)| (s - mean).powi(2))
+                .sum::<f64>()
                 / raw_scores.len() as f64;
             let stddev = variance.sqrt();
 
@@ -157,11 +229,14 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
                     .map(|(t, s)| (t.clone(), (s - mean) / stddev))
                     .collect()
             } else {
-                raw_scores.iter().map(|(t, _)| (t.clone(), 0.0)).collect()
+                raw_scores
+                    .iter()
+                    .map(|(t, _)| (t.clone(), 0.0))
+                    .collect()
             };
 
-            // Sort by z-score descending, take top N above threshold
-            z_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            z_scored
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             for (term, zscore) in z_scored
                 .into_iter()
@@ -176,56 +251,29 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
             }
         }
 
-        // Update value space
-        self.value_space
-            .update_terms(&scores, self.config.ewma_alpha as f64);
+        (detected, scores)
+    }
 
-        // Compute pairwise causal cosines for detected terms
-        let detected_terms: Vec<String> = scores.keys().cloned().collect();
-        let mut pairwise_cosines = HashMap::new();
-        for i in 0..detected_terms.len() {
-            for j in (i + 1)..detected_terms.len() {
-                let term_a = &detected_terms[i];
-                let term_b = &detected_terms[j];
+    /// Compute pairwise causal cosines for a set of detected terms.
+    fn compute_pairwise(
+        &self,
+        scores: &HashMap<String, f64>,
+    ) -> HashMap<(String, String), f64> {
+        let terms: Vec<String> = scores.keys().cloned().collect();
+        let mut pairwise = HashMap::new();
+        for i in 0..terms.len() {
+            for j in (i + 1)..terms.len() {
                 if let (Some(emb_a), Some(emb_b)) = (
-                    self.embedding_source.embed(term_a),
-                    self.embedding_source.embed(term_b),
+                    self.embedding_source.embed(&terms[i]),
+                    self.embedding_source.embed(&terms[j]),
                 ) {
                     if let Ok(cos) = causal_cosine(&emb_a, &emb_b, &self.geometry) {
-                        pairwise_cosines
-                            .insert((term_a.clone(), term_b.clone()), cos as f64);
+                        pairwise.insert((terms[i].clone(), terms[j].clone()), cos as f64);
                     }
                 }
             }
         }
-        self.value_space.update_pairwise(&pairwise_cosines);
-
-        // Signal 4: manifold density (if enough activations collected)
-        let manifold_density_score = self.compute_manifold_density_signal();
-
-        // Run deviation detection
-        let deviation_report = detect_deviation(
-            &scores,
-            &pairwise_cosines,
-            &self.value_space,
-            &self.config,
-            manifold_density_score,
-        );
-
-        let deviation = if deviation_report.baseline_sufficient {
-            self.cumulative_drift += deviation_report.profile_drift;
-            self.latest_deviation = Some(deviation_report.clone());
-            self.deviation_history.push(deviation_report.clone());
-            Some(deviation_report)
-        } else {
-            None
-        };
-
-        Ok(ObservationResult {
-            detected_values: detected,
-            deviation,
-            observation_count: self.value_space.observation_count,
-        })
+        pairwise
     }
 
     /// Compute Signal 4: is the latest activation off-manifold?
@@ -439,10 +487,14 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
     }
 
     /// Per-term log-densities from the most recent manifold computation.
-    /// Maps term name → log-density on the activation manifold.
-    /// Empty before any manifold computation or if insufficient activations.
     pub fn term_densities(&self) -> &HashMap<String, f32> {
         &self.latest_term_densities
+    }
+
+    /// The user's value context profile (EWMA of detected value scores).
+    /// Descriptive only — not used for trust or deviation computation.
+    pub fn user_value_profile(&self) -> &HashMap<String, f64> {
+        &self.user_value_profile
     }
 
     /// Produce a signed attestation that includes manifold readings.
@@ -500,7 +552,7 @@ mod tests {
         let mut session = make_test_session();
         // Embedding close to "honesty" direction
         let embedding = vec![0.9, 0.1, 0.0, 0.0];
-        let result = session.observe(&embedding).unwrap();
+        let result = session.observe(&embedding, "assistant").unwrap();
         assert!(!result.detected_values.is_empty());
         assert_eq!(result.observation_count, 1);
     }
@@ -513,7 +565,7 @@ mod tests {
         for i in 0..25 {
             let angle = (i as f32) * 0.1;
             let embedding = vec![angle.cos(), angle.sin(), 0.1, 0.0];
-            session.observe(&embedding).unwrap();
+            session.observe(&embedding, "assistant").unwrap();
         }
 
         assert_eq!(session.value_space().observation_count, 25);
@@ -538,7 +590,7 @@ mod tests {
         let mut session = make_test_session();
 
         for _ in 0..5 {
-            session.observe(&[0.5, 0.5, 0.0, 0.0]).unwrap();
+            session.observe(&[0.5, 0.5, 0.0, 0.0], "assistant").unwrap();
         }
 
         let att1 = session
@@ -547,7 +599,7 @@ mod tests {
         assert!(att1.parent_hash.is_none());
 
         for _ in 0..5 {
-            session.observe(&[0.3, 0.7, 0.0, 0.0]).unwrap();
+            session.observe(&[0.3, 0.7, 0.0, 0.0], "assistant").unwrap();
         }
 
         let att2 = session

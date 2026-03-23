@@ -508,41 +508,28 @@ fn compute_trust_scores(turns: &mut [TurnAnalysis]) {
         return;
     }
 
-    let mut drift_penalty: f32 = 0.0;
-    let decay = 0.7; // drift memory: 70% carried forward each turn
-    let drift_weight = 2.0; // amplify drops
-    let recovery_threshold = 0.7; // only allow penalty decay when coherence is healthy
+    let mut contradiction_memory: f32 = 0.0;
+    let decay = 0.8; // memory of past contradictions decays per turn
+    let contradiction_weight = 0.5; // how much each contradiction-bearing message hurts
 
     for i in 0..turns.len() {
-        let coherence = turns[i].coherence_score;
+        let msg_coh = turns[i].message_coherence;
 
-        if i > 0 {
-            let prev_coherence = turns[i - 1].coherence_score;
-            let delta = coherence - prev_coherence;
-            if delta < 0.0 {
-                // Coherence dropped — accumulate drift penalty
-                drift_penalty = (drift_penalty * decay) + (-delta * drift_weight);
-            } else if coherence > recovery_threshold {
-                // Only allow recovery when coherence is actually healthy.
-                // If coherence is still low, trust should NOT silently recover.
-                drift_penalty *= decay;
-            }
-            // else: coherence is low and not dropping further — penalty stays.
+        // Accumulate memory of contradictory messages
+        if !turns[i].message_contradictions.is_empty() {
+            // This message contained contradictions — penalise
+            let severity = 1.0 - msg_coh;
+            contradiction_memory = (contradiction_memory * decay) + (severity * contradiction_weight);
+        } else {
+            // Clean message — let memory decay
+            contradiction_memory *= decay;
         }
 
-        // Floor: sustained low coherence maintains a minimum penalty
-        // so trust can't exceed coherence even if no new drops occur.
-        let coherence_floor = (1.0 - coherence) * 0.8;
-        drift_penalty = drift_penalty.max(coherence_floor);
-
-        let stability = (1.0 - drift_penalty).clamp(0.0, 1.0);
-
-        // Trust combines cumulative coherence, stability, AND per-message coherence.
-        // message_coherence captures ongoing mixing of opposed values even after
-        // the cumulative set saturates.
-        let msg_coh = turns[i].message_coherence;
-        let blended_coherence = coherence.min(msg_coh);
-        turns[i].trust_score = (blended_coherence * stability).clamp(0.0, 1.0);
+        // Trust = message coherence × (1 - contradiction memory)
+        // A coherent message after a string of contradictions still gets
+        // partial trust reduction from memory. But it CAN recover.
+        let memory_factor = (1.0 - contradiction_memory).clamp(0.0, 1.0);
+        turns[i].trust_score = (msg_coh * memory_factor).clamp(0.0, 1.0);
     }
 }
 
