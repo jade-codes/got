@@ -35,6 +35,10 @@
     <div class="score-label" id="deviationLabel">DEVIATION</div>
   </div>
   <div class="score-section">
+    <div class="score-badge" id="manifoldValue">--</div>
+    <div class="score-label" id="manifoldLabel">MANIFOLD</div>
+  </div>
+  <div class="score-section">
     <div class="score-badge" id="obsCount">0</div>
     <div class="score-label">OBS</div>
   </div>
@@ -101,6 +105,7 @@
       <button class="tab-btn" data-tab="chord">Chord</button>
       <button class="tab-btn" data-tab="heatmap">Heatmap</button>
       <button class="tab-btn" data-tab="sphere">Sphere</button>
+      <button class="tab-btn" data-tab="manifold">Manifold</button>
     </div>
     <div class="tab-panel active" id="tab-values">
       <div class="empty-state"><p>No values detected yet</p></div>
@@ -122,6 +127,13 @@
     </div>
     <div class="tab-panel" id="tab-sphere">
       <div class="viz-container" id="sphereViz"></div>
+    </div>
+    <div class="tab-panel" id="tab-manifold">
+      <div class="manifold-header">
+        <button id="btnManifold" class="snapshot-btn">Attest Manifold</button>
+        <span id="manifoldStatus" class="manifold-status">Need 20+ observations</span>
+      </div>
+      <div id="manifoldContent" class="empty-state"><p>Send messages to accumulate activations, then compute manifold geometry</p></div>
     </div>
   </div>
 </div>

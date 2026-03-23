@@ -379,7 +379,7 @@ impl CausalGeometry {
 
     // --- internal helpers ---
 
-    fn check_vec(&self, v: &[f32]) -> Result<(), GeometryError> {
+    pub(crate) fn check_vec(&self, v: &[f32]) -> Result<(), GeometryError> {
         if v.len() != self.hidden_dim {
             return Err(GeometryError::DimensionMismatch {
                 expected: self.hidden_dim,
@@ -396,6 +396,20 @@ impl CausalGeometry {
         }
         Ok(())
     }
+}
+
+/// Euclidean cosine similarity between two vectors (no geometry weighting).
+///
+/// Returns 0.0 if either vector has near-zero norm.
+/// Result is clamped to [-1, 1].
+pub fn euclidean_cosine(u: &[f32], v: &[f32]) -> f32 {
+    let dot: f32 = u.iter().zip(v.iter()).map(|(a, b)| a * b).sum();
+    let norm_u: f32 = u.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_v: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_u < f32::EPSILON || norm_v < f32::EPSILON {
+        return 0.0;
+    }
+    (dot / (norm_u * norm_v)).clamp(-1.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------

@@ -69,6 +69,15 @@ export async function proxyHistory(sessionId) {
   return res.json();
 }
 
+export async function proxyManifold(sessionId) {
+  const res = await fetch(`/api/proxy/session/${sessionId}/manifold`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  return res.json();
+}
+
 export async function proxySnapshot(sessionId, attestationType) {
   const body = {};
   if (attestationType) body.attestation_type = attestationType;

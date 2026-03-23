@@ -1,4 +1,5 @@
 pub mod geometry;
+pub mod manifold;
 
 use serde::{Deserialize, Serialize};
 
@@ -269,6 +270,15 @@ pub struct GeometricAttestation {
     )]
     pub probe_commitment: Option<[u8; 32]>,
 
+    // --- v4 manifold analysis fields ---
+    /// Manifold density reading under the causal metric. None for pre-v4 attestations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density_reading: Option<manifold::DensityReading>,
+
+    /// Sectional curvature reading under the causal metric. None for pre-v4 attestations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curvature_reading: Option<manifold::CurvatureReading>,
+
     /// Ed25519 over all preceding fields (canonical serialisation).
     #[serde(with = "hex64")]
     pub signature: [u8; 64],
@@ -355,6 +365,9 @@ pub const SCHEMA_VERSION_2: u16 = 2;
 /// Wire-format version 3 (causal intervention scores).
 pub const SCHEMA_VERSION_3: u16 = 3;
 
+/// Wire-format version 4 (manifold density reading).
+pub const SCHEMA_VERSION_4: u16 = 4;
+
 // ---------------------------------------------------------------------------
 // SHA-256 helper (used by multiple crates, centralised here)
 // ---------------------------------------------------------------------------
@@ -422,9 +435,8 @@ mod tests {
         let json = format!(r#"{{"h":"{bad}"}}"#);
         #[derive(serde::Deserialize)]
         struct W {
-            #[serde(with = "hex32")]
-            #[allow(dead_code)]
-            h: [u8; 32],
+            #[serde(rename = "h", with = "hex32")]
+            _h: [u8; 32],
         }
         let result: Result<W, _> = serde_json::from_str(&json);
         assert!(result.is_err(), "non-ASCII hex should be rejected");
@@ -438,9 +450,8 @@ mod tests {
         let json = format!(r#"{{"s":"{bad}"}}"#);
         #[derive(serde::Deserialize)]
         struct W {
-            #[serde(with = "hex64")]
-            #[allow(dead_code)]
-            s: [u8; 64],
+            #[serde(rename = "s", with = "hex64")]
+            _s: [u8; 64],
         }
         let result: Result<W, _> = serde_json::from_str(&json);
         assert!(result.is_err(), "non-ASCII hex should be rejected");

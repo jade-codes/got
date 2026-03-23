@@ -7,7 +7,7 @@
 //   4. update all visualizations
 
 import { fetchDemoConversation, analyseConversation, embedText,
-         createProxySession, proxyObserve, proxySnapshot,
+         createProxySession, proxyObserve, proxyManifold, proxySnapshot,
          chatWithModel } from './api.js';
 import { scoreColour, trustColour } from './shared/colors.js';
 import { esc, getTermList, findPair } from './shared/utils.js';
@@ -28,6 +28,7 @@ let deviationHistory = [];
 let attestations = [];
 let allMessages = [];         // accumulated messages [{speaker, text, embedding}]
 let speakerMap = {};
+let latestSnapshot = null;    // most recent snapshot response (manifold data)
 
 // ---- LLM settings ----
 let llmProvider, llmApiKey, llmModel, llmBaseUrl;
@@ -296,6 +297,11 @@ async function runCoherenceAnalysis() {
       renderVerdict(analysis);
       selectTurn(analysis.turns.length - 1);
     }
+
+    // Auto-fetch manifold data (non-blocking)
+    if (sessionId && observationCount >= 20) {
+      fetchManifold();
+    }
   } catch (err) {
     console.error('Coherence analysis failed:', err);
   }
@@ -329,7 +335,7 @@ function selectTurn(idx) {
   renderChordDiagram(turn);
   renderHeatmap(turn);
   const prevTurn = idx > 0 ? analysis.turns[idx - 1] : null;
-  renderSphere(turn, prevTurn);
+  renderSphere(turn, prevTurn, latestSnapshot);
 }
 
 // ---- Chat rendering ----
@@ -395,6 +401,21 @@ function updateTermLegend(turn) {
 
 // ---- Deviation display ----
 
+function updateManifoldBadge(deviation) {
+  const badge = document.getElementById('manifoldValue');
+  const label = document.getElementById('manifoldLabel');
+  if (!deviation || deviation.manifold_density_score === undefined) {
+    badge.textContent = '--';
+    badge.style.color = '#8b949e';
+    label.textContent = 'MANIFOLD';
+    return;
+  }
+  const score = deviation.manifold_density_score;
+  badge.textContent = score < 0.01 ? 'ON' : 'OFF';
+  badge.style.color = score < 0.01 ? '#3fb950' : '#f85149';
+  label.textContent = 'MANIFOLD';
+}
+
 function updateDeviationDisplay(deviation) {
   const badge = document.getElementById('deviationValue');
   const verdict = document.getElementById('deviationVerdict');
@@ -402,6 +423,7 @@ function updateDeviationDisplay(deviation) {
   const baselineEl = document.getElementById('baselineProgress');
 
   obsEl.textContent = observationCount;
+  updateManifoldBadge(deviation);
 
   if (!deviation) {
     badge.textContent = '--';
@@ -441,6 +463,7 @@ function updateSignals(deviation) {
     { name: 'Term Z-Score Shift', value: deviation.term_score },
     { name: 'Profile Cosine Drift', value: Math.min(1, deviation.profile_drift / 2) },
     { name: 'Pairwise Disruption', value: deviation.relationship_score },
+    { name: 'Manifold Density', value: deviation.manifold_density_score || 0 },
   ];
 
   let html = '';
@@ -503,9 +526,78 @@ function renderValuesList(panel, values) {
 // ---- Deviation timeline chart ----
 
 function updateDeviationTimeline() {
-  // Reuse the timeline chart area or a separate container?
-  // For now this is informational — the main timeline shows coherence.
-  // Deviation data is shown in the signal cards above.
+  // Nothing to do — deviation data is shown in signal cards and the
+  // manifold badge. The timeline chart shows coherence + trust lines.
+}
+
+// ---- Manifold tab ----
+
+async function fetchManifold() {
+  if (!sessionId) return;
+  const btn = document.getElementById('btnManifold');
+  const status = document.getElementById('manifoldStatus');
+  btn.disabled = true;
+  status.textContent = 'Computing...';
+
+  try {
+    const result = await proxyManifold(sessionId);
+    status.textContent = 'Attested #' + result.sequence_number +
+      ' (' + result.observation_count + ' obs) ' +
+      result.attestation_hash.substring(0, 12) + '...';
+    latestSnapshot = result;
+    renderManifoldTab(result);
+    // Re-render sphere if a turn is selected (now with density data)
+    if (analysis && currentTurn >= 0) {
+      const turn = analysis.turns[currentTurn];
+      const prevTurn = currentTurn > 0 ? analysis.turns[currentTurn - 1] : null;
+      renderSphere(turn, prevTurn, latestSnapshot);
+    }
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderManifoldTab(snapshot) {
+  const panel = document.getElementById('manifoldContent');
+  let html = '';
+
+  if (snapshot.manifold_density) {
+    const d = snapshot.manifold_density;
+    html += '<div class="manifold-section"><h3>Density</h3>';
+    html += manifoldMetric('Intrinsic Dimension', d.mean_intrinsic_dim.toFixed(2),
+      '\u00B1 ' + d.std_intrinsic_dim.toFixed(2));
+    html += manifoldMetric('Mean Log-Density', d.mean_log_density.toFixed(3), '');
+    html += manifoldMetric('Points', d.num_points, d.num_degenerate > 0 ? d.num_degenerate + ' degenerate' : '');
+    html += '</div>';
+  }
+
+  if (snapshot.manifold_curvature) {
+    const c = snapshot.manifold_curvature;
+    html += '<div class="manifold-section"><h3>Curvature</h3>';
+    html += manifoldMetric('Mean Curvature', c.mean_curvature.toFixed(4),
+      '\u00B1 ' + c.std_curvature.toFixed(4));
+    const sign = c.mean_curvature > 0.001 ? 'positive (sphere-like)'
+      : c.mean_curvature < -0.001 ? 'negative (saddle-like)' : 'flat';
+    html += manifoldMetric('Geometry', sign, '');
+    html += manifoldMetric('Points', c.num_points, c.num_degenerate > 0 ? c.num_degenerate + ' degenerate' : '');
+    html += '</div>';
+  }
+
+  if (!snapshot.manifold_density && !snapshot.manifold_curvature) {
+    html = '<div class="empty-state"><p>Not enough activations for manifold analysis (need 20+)</p></div>';
+  }
+
+  panel.innerHTML = html;
+}
+
+function manifoldMetric(label, value, detail) {
+  return '<div class="manifold-metric">' +
+    '<span class="metric-label">' + label + '</span>' +
+    '<span class="metric-value">' + value + '</span>' +
+    (detail ? '<span class="metric-detail">' + detail + '</span>' : '') +
+    '</div>';
 }
 
 // ---- Init ----
@@ -557,6 +649,9 @@ export function init() {
 
   // Load demo
   btnLoadDemo.addEventListener('click', loadDemo);
+
+  // Manifold computation
+  document.getElementById('btnManifold').addEventListener('click', fetchManifold);
 
   // Navigation
   btnPrev.addEventListener('click', () => {

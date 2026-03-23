@@ -482,6 +482,8 @@ impl MeasurementSidecar {
             sequence_number: self.next_sequence_number,
             directional_drifts: vec![],
             probe_commitment: Some(self.probe_commitment),
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64], // caller signs
         };
 

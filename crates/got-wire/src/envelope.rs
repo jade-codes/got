@@ -299,6 +299,8 @@ mod tests {
             sequence_number: 0,
             directional_drifts: vec![],
             probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64],
         }
     }

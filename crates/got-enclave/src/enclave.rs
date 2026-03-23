@@ -406,6 +406,8 @@ impl MeasurementEnclave for MockEnclave {
             sequence_number: self.next_sequence,
             directional_drifts: vec![],
             probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64],
         };
 
@@ -449,6 +451,8 @@ impl MeasurementEnclave for MockEnclave {
             sequence_number: self.next_sequence,
             directional_drifts: vec![],
             probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64],
         };
 

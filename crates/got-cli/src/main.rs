@@ -844,6 +844,8 @@ fn cmd_attest(
         sequence_number: parent_sequence_number.map_or(0, |s| s + 1),
         directional_drifts,
         probe_commitment,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
 

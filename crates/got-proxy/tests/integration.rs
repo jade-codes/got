@@ -50,7 +50,7 @@ fn full_proxy_pipeline() {
     let dim = 8;
     let geometry = make_geometry(dim);
     let embeddings = make_embeddings(dim);
-    let source = PrecomputedEmbeddings::new(embeddings.clone()).unwrap();
+    let source = PrecomputedEmbeddings::new(embeddings).unwrap();
     let sk = SigningKey::from_bytes(&[42u8; 32]);
     let vk = sk.verifying_key();
 
@@ -59,7 +59,6 @@ fn full_proxy_pipeline() {
         "test-closed-model".into(),
         sk,
         geometry,
-        embeddings,
         source,
         ProxyConfig::default(),
         MemoryValueSpaceStore::new(),
@@ -139,17 +138,17 @@ fn value_space_hash_determinism() {
 
     // Create two sessions with identical inputs
     let source1 = PrecomputedEmbeddings::new(embeddings.clone()).unwrap();
-    let source2 = PrecomputedEmbeddings::new(embeddings.clone()).unwrap();
+    let source2 = PrecomputedEmbeddings::new(embeddings).unwrap();
 
     let mut s1 = ProxySession::new(
         "s1".into(), "model".into(), sk.clone(),
-        make_geometry(dim), embeddings.clone(), source1,
+        make_geometry(dim), source1,
         ProxyConfig::default(), MemoryValueSpaceStore::new(),
     ).unwrap();
 
     let mut s2 = ProxySession::new(
         "s2".into(), "model".into(), sk,
-        make_geometry(dim), embeddings, source2,
+        make_geometry(dim), source2,
         ProxyConfig::default(), MemoryValueSpaceStore::new(),
     ).unwrap();
 

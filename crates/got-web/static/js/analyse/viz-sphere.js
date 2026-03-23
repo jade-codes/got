@@ -38,7 +38,7 @@ function mds3(B, n) {
   return coords;
 }
 
-export function renderSphere(turn, prevTurn) {
+export function renderSphere(turn, prevTurn, snapshot) {
   const container = document.getElementById('sphereViz');
   container.innerHTML = '';
   const terms = getTermList(turn);
@@ -126,6 +126,30 @@ export function renderSphere(turn, prevTurn) {
 
   const active = new Set(turn.cumulative_values);
   const introduced = new Set(turn.values_introduced);
+
+  // Per-term density from snapshot (if available)
+  const termDensities = (snapshot && snapshot.term_densities) ? snapshot.term_densities : {};
+  const densityValues = Object.values(termDensities);
+  const hasDensity = densityValues.length > 0;
+  const minDensity = hasDensity ? Math.min(...densityValues) : 0;
+  const maxDensity = hasDensity ? Math.max(...densityValues) : 0;
+  const densityRange = maxDensity - minDensity;
+
+  // Map log-density to 0..1 (0 = sparse/off-manifold, 1 = dense/on-manifold)
+  function densityNorm(term) {
+    const ld = termDensities[term];
+    if (ld === undefined || densityRange < 1e-6) return null;
+    return (ld - minDensity) / densityRange;
+  }
+
+  // Density color: dark purple (sparse) → bright green (dense)
+  function densityColor(norm) {
+    if (norm === null) return null;
+    const r = Math.round(88 * (1 - norm) + 63 * norm);
+    const g = Math.round(24 * (1 - norm) + 185 * norm);
+    const b = Math.round(69 * (1 - norm) + 80 * norm);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
 
   let rotX = -0.3, rotY = 0.4;
 
@@ -220,10 +244,12 @@ export function renderSphere(turn, prevTurn) {
       const depthFade = 0.4 + 0.6 * ((pt.z + 1) / 2);
 
       let r, fill, stroke, sw;
-      if (isNew) { r = 8 * pt.scale; fill = '#58a6ff'; stroke = '#79c0ff'; sw = 2.5; }
-      else if (isActive && wasPrev) { r = 6 * pt.scale; fill = '#8b949e'; stroke = '#30363d'; sw = 1; }
-      else if (isActive) { r = 7 * pt.scale; fill = '#f0f6fc'; stroke = '#30363d'; sw = 1; }
-      else { r = 3 * pt.scale; fill = '#21262d'; stroke = '#30363d'; sw = 0.5; }
+      const dn = densityNorm(pt.term);
+      const dc = densityColor(dn);
+      if (isNew) { r = 8 * pt.scale; fill = dc || '#58a6ff'; stroke = '#79c0ff'; sw = 2.5; }
+      else if (isActive && wasPrev) { r = 6 * pt.scale; fill = dc || '#8b949e'; stroke = '#30363d'; sw = 1; }
+      else if (isActive) { r = 7 * pt.scale; fill = dc || '#f0f6fc'; stroke = '#30363d'; sw = 1; }
+      else { r = 3 * pt.scale; fill = dc || '#21262d'; stroke = '#30363d'; sw = 0.5; }
 
       if (isActive && pt.r3d > 0.05) {
         dotGroup.append('circle').attr('cx', pt.px).attr('cy', pt.py)
@@ -236,6 +262,7 @@ export function renderSphere(turn, prevTurn) {
         .attr('fill', fill).attr('stroke', stroke).attr('stroke-width', sw)
         .attr('opacity', (isActive ? 1 : 0.3) * depthFade)
         .append('title').text(pt.term + ' (r=' + pt.r3d.toFixed(2) + ')' +
+          (dn !== null ? ' density=' + termDensities[pt.term].toFixed(2) : '') +
           (isNew ? ' [NEW]' : wasPrev ? ' [previous]' : ''));
 
       if (isActive || isNew) {
@@ -268,19 +295,49 @@ export function renderSphere(turn, prevTurn) {
 
   svg.call(drag);
 
+  // Manifold annotation overlay (top-right corner)
+  if (snapshot && (snapshot.manifold_density || snapshot.manifold_curvature)) {
+    const infoG = svg.append('g').attr('transform', 'translate(' + (size - 10) + ', 16)');
+    let yOff = 0;
+    infoG.append('text').attr('text-anchor', 'end').attr('y', yOff)
+      .attr('fill', '#58a6ff').attr('font-size', '10px').attr('font-weight', '600')
+      .text('MANIFOLD');
+    if (snapshot.manifold_density) {
+      yOff += 14;
+      infoG.append('text').attr('text-anchor', 'end').attr('y', yOff)
+        .attr('fill', '#8b949e').attr('font-size', '10px')
+        .text('dim ' + snapshot.manifold_density.mean_intrinsic_dim.toFixed(1) +
+          ' | \u03C1 ' + snapshot.manifold_density.mean_log_density.toFixed(1));
+    }
+    if (snapshot.manifold_curvature) {
+      yOff += 14;
+      const kappa = snapshot.manifold_curvature.mean_curvature;
+      const sign = kappa > 0.001 ? '+' : kappa < -0.001 ? '' : '\u2248';
+      infoG.append('text').attr('text-anchor', 'end').attr('y', yOff)
+        .attr('fill', '#8b949e').attr('font-size', '10px')
+        .text('\u03BA ' + sign + kappa.toFixed(3));
+    }
+  }
+
   // Legend
   const legend = d3.select(container).append('div')
     .style('display', 'flex').style('gap', '16px').style('padding', '10px 0')
     .style('justify-content', 'center').style('flex-wrap', 'wrap')
     .style('font-size', '11px').style('color', '#8b949e');
 
-  [
+  const items = [
     { label: 'New this turn', color: '#58a6ff', dash: false },
     { label: 'Previous', color: '#8b949e', dash: true },
     { label: 'Opposed', color: '#f85149', dash: false },
     { label: 'Aligned', color: '#3fb950', dash: false },
     { label: 'Near centre = mixed', color: '#484f58', dash: false },
-  ].forEach(item => {
+  ];
+  if (hasDensity) {
+    items.push({ label: 'Dense (on-manifold)', color: densityColor(1), dash: undefined });
+    items.push({ label: 'Sparse (off-manifold)', color: densityColor(0), dash: undefined });
+  }
+
+  items.forEach(item => {
     const el = legend.append('span').style('display', 'inline-flex')
       .style('align-items', 'center').style('gap', '4px');
     const sw = el.append('svg').attr('width', 20).attr('height', 10);

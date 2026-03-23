@@ -86,6 +86,7 @@ pub struct DeviationResponse {
     pub term_score: f64,
     pub profile_drift: f64,
     pub relationship_score: f64,
+    pub manifold_density_score: f64,
     pub combined_score: f64,
     pub verdict: String,
     pub baseline_sufficient: bool,
@@ -119,6 +120,33 @@ pub struct SnapshotResponse {
     pub sequence_number: u64,
     pub observation_count: u64,
     pub attestation_type: String,
+    /// Manifold density summary, if sufficient activations were collected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifold_density: Option<ManifoldSummary>,
+    /// Manifold curvature summary, if sufficient activations were collected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifold_curvature: Option<CurvatureSummary>,
+    /// Per-term log-density on the activation manifold.
+    /// Maps term name → log-density. Empty if insufficient activations.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub term_densities: HashMap<String, f32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ManifoldSummary {
+    pub mean_intrinsic_dim: f32,
+    pub std_intrinsic_dim: f32,
+    pub mean_log_density: f32,
+    pub num_points: usize,
+    pub num_degenerate: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CurvatureSummary {
+    pub mean_curvature: f32,
+    pub std_curvature: f32,
+    pub num_points: usize,
+    pub num_degenerate: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,6 +163,7 @@ fn deviation_to_response(d: &DeviationReport) -> DeviationResponse {
         term_score: d.term_score,
         profile_drift: d.profile_drift,
         relationship_score: d.relationship_score,
+        manifold_density_score: d.manifold_density_score,
         combined_score: d.combined_score,
         verdict: match d.verdict {
             DeviationVerdict::WithinBaseline => "within_baseline".into(),
@@ -198,7 +227,6 @@ pub async fn create_session(
         req.target_model_id.clone(),
         sk,
         clone_geometry(&state.geometry, state.hidden_dim),
-        state.term_embeddings.clone(),
         source,
         ProxyConfig::default(),
         MemoryValueSpaceStore::new(),
@@ -289,6 +317,66 @@ pub async fn deviation_history(
     }))
 }
 
+/// POST /api/proxy/session/:id/manifold — attested manifold geometry.
+///
+/// Produces a signed Snapshot attestation that includes manifold density and
+/// curvature readings, then returns the readings plus per-term densities.
+/// Every response is backed by a verifiable Ed25519 signature.
+pub async fn manifold(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<ManifoldResponse>, (StatusCode, Json<ProxyErrorResponse>)> {
+    let mut sessions = state.proxy.sessions.lock().await;
+    let session = sessions
+        .get_mut(&session_id)
+        .ok_or_else(|| proxy_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
+
+    let (attestation, term_densities) = session
+        .attest_manifold()
+        .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("attestation: {e}")))?;
+
+    let hash = got_proxy::attestation::attestation_hash(&attestation);
+
+    let manifold_density = attestation.density_reading.as_ref().map(|dr| ManifoldSummary {
+        mean_intrinsic_dim: dr.mean_intrinsic_dim,
+        std_intrinsic_dim: dr.std_intrinsic_dim,
+        mean_log_density: dr.mean_log_density,
+        num_points: dr.points.len(),
+        num_degenerate: dr.num_degenerate,
+    });
+
+    let manifold_curvature = attestation.curvature_reading.as_ref().map(|cr| CurvatureSummary {
+        mean_curvature: cr.mean_curvature,
+        std_curvature: cr.std_curvature,
+        num_points: cr.points.len(),
+        num_degenerate: cr.num_degenerate,
+    });
+
+    Ok(Json(ManifoldResponse {
+        attestation_hash: hex_encode(&hash),
+        sequence_number: attestation.sequence_number,
+        observation_count: attestation.observation_count,
+        manifold_density,
+        manifold_curvature,
+        term_densities,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ManifoldResponse {
+    /// SHA-256 of the signed attestation backing this data.
+    pub attestation_hash: String,
+    /// Monotonic sequence number of the attestation.
+    pub sequence_number: u64,
+    pub observation_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifold_density: Option<ManifoldSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifold_curvature: Option<CurvatureSummary>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub term_densities: HashMap<String, f32>,
+}
+
 /// POST /api/proxy/session/:id/snapshot
 pub async fn snapshot(
     State(state): State<Arc<AppState>>,
@@ -307,10 +395,30 @@ pub async fn snapshot(
 
     let hash = got_proxy::attestation::attestation_hash(&attestation);
 
+    let manifold_density = attestation.density_reading.as_ref().map(|dr| ManifoldSummary {
+        mean_intrinsic_dim: dr.mean_intrinsic_dim,
+        std_intrinsic_dim: dr.std_intrinsic_dim,
+        mean_log_density: dr.mean_log_density,
+        num_points: dr.points.len(),
+        num_degenerate: dr.num_degenerate,
+    });
+
+    let manifold_curvature = attestation.curvature_reading.as_ref().map(|cr| CurvatureSummary {
+        mean_curvature: cr.mean_curvature,
+        std_curvature: cr.std_curvature,
+        num_points: cr.points.len(),
+        num_degenerate: cr.num_degenerate,
+    });
+
+    let term_densities = session.term_densities().clone();
+
     Ok(Json(SnapshotResponse {
         attestation_hash: hex_encode(&hash),
         sequence_number: attestation.sequence_number,
         observation_count: attestation.observation_count,
         attestation_type: format!("{:?}", attestation.attestation_type),
+        manifold_density,
+        manifold_curvature,
+        term_densities,
     }))
 }

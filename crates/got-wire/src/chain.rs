@@ -181,6 +181,8 @@ mod tests {
             sequence_number: 0,
             directional_drifts: vec![],
             probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64],
         };
         assemble_and_sign(a, key).unwrap()
@@ -215,6 +217,8 @@ mod tests {
             sequence_number: parent.sequence_number + 1,
             directional_drifts: vec![],
             probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64],
         };
         assemble_and_sign(a, key).unwrap()
@@ -277,6 +281,8 @@ mod tests {
             sequence_number: 0,
             directional_drifts: vec![],
             probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64],
         };
         bad_anchor = assemble_and_sign(bad_anchor, &key).unwrap();
@@ -314,6 +320,8 @@ mod tests {
             sequence_number: 1,
             directional_drifts: vec![],
             probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64],
         };
         bad_child = assemble_and_sign(bad_child, &key).unwrap();
@@ -394,6 +402,8 @@ mod tests {
             sequence_number: 1,
             directional_drifts: vec![],
             probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64],
         };
         bad = assemble_and_sign(bad, &key).unwrap();
@@ -449,6 +459,8 @@ mod tests {
             sequence_number: 1,
             directional_drifts: vec![],
             probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64],
         };
         let child = assemble_and_sign(child, &key_b).unwrap();

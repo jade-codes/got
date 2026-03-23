@@ -10,6 +10,8 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 
+use got_core::manifold::{CurvatureReading, DensityReading};
+
 use crate::deviation::{DeviationReport, DeviationVerdict};
 use crate::ProxyError;
 
@@ -75,6 +77,12 @@ pub struct BehavioralAttestation {
     pub summary: AttestationSummary,
     /// Deviation report (present only for Alert attestations).
     pub deviation: Option<DeviationReport>,
+    /// Manifold density reading at snapshot time. None if insufficient activations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub density_reading: Option<DensityReading>,
+    /// Manifold curvature reading at snapshot time. None if insufficient activations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curvature_reading: Option<CurvatureReading>,
     /// Ed25519 signature over canonical serialisation of all preceding fields.
     #[serde(with = "got_core::hex64")]
     pub signature: [u8; 64],
@@ -152,6 +160,48 @@ pub fn serialise_for_signing(a: &BehavioralAttestation) -> Vec<u8> {
         None => {
             buf.push(0);
         }
+    }
+
+    // Density reading presence
+    match &a.density_reading {
+        Some(dr) => {
+            buf.push(1);
+            buf.extend_from_slice(&(dr.points.len() as u32).to_le_bytes());
+            for p in &dr.points {
+                buf.extend_from_slice(&p.log_density.to_le_bytes());
+                buf.extend_from_slice(&p.intrinsic_dim.to_le_bytes());
+            }
+            buf.extend_from_slice(&dr.mean_intrinsic_dim.to_le_bytes());
+            buf.extend_from_slice(&dr.std_intrinsic_dim.to_le_bytes());
+            buf.extend_from_slice(&dr.mean_log_density.to_le_bytes());
+            buf.extend_from_slice(&dr.k.to_le_bytes());
+            buf.extend_from_slice(&dr.num_degenerate.to_le_bytes());
+        }
+        None => buf.push(0),
+    }
+
+    // Curvature reading presence
+    match &a.curvature_reading {
+        Some(cr) => {
+            buf.push(1);
+            buf.extend_from_slice(&(cr.points.len() as u32).to_le_bytes());
+            for p in &cr.points {
+                buf.extend_from_slice(&p.sectional_curvature.to_le_bytes());
+                buf.extend_from_slice(&p.num_triangles.to_le_bytes());
+            }
+            buf.extend_from_slice(&cr.mean_curvature.to_le_bytes());
+            buf.extend_from_slice(&cr.std_curvature.to_le_bytes());
+            match cr.curvature_uncertainty_correlation {
+                Some(r) => {
+                    buf.push(1);
+                    buf.extend_from_slice(&r.to_le_bytes());
+                }
+                None => buf.push(0),
+            }
+            buf.extend_from_slice(&cr.k.to_le_bytes());
+            buf.extend_from_slice(&cr.num_degenerate.to_le_bytes());
+        }
+        None => buf.push(0),
     }
 
     buf
@@ -235,6 +285,8 @@ mod tests {
                 cumulative_drift: 0.05,
             },
             deviation: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0; 64],
         }
     }

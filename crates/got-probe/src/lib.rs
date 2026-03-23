@@ -12,6 +12,7 @@ use got_core::geometry::{CausalGeometry, GeometryError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod experiment;
 pub mod hooks;
 pub mod intervention;
 

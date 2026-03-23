@@ -336,16 +336,8 @@ pub fn analyse(
 // ---------------------------------------------------------------------------
 
 /// Ordinary cosine similarity (no geometry weighting).
-/// Useful as a baseline comparison or when Φ is not available.
-pub fn euclidean_cosine(u: &[f32], v: &[f32]) -> f32 {
-    let dot: f32 = u.iter().zip(v.iter()).map(|(a, b)| a * b).sum();
-    let norm_u: f32 = u.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_v: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_u < f32::EPSILON || norm_v < f32::EPSILON {
-        return 0.0;
-    }
-    (dot / (norm_u * norm_v)).clamp(-1.0, 1.0)
-}
+/// Re-exported from got-core for backward compatibility.
+pub use got_core::geometry::euclidean_cosine;
 
 // ---------------------------------------------------------------------------
 // Conversation-level types

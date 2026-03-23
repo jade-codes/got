@@ -355,6 +355,7 @@ async fn main() {
         .route("/api/proxy/session/:id/observe", post(got_web::proxy_api::observe))
         .route("/api/proxy/session/:id/status", get(got_web::proxy_api::session_status))
         .route("/api/proxy/session/:id/history", get(got_web::proxy_api::deviation_history))
+        .route("/api/proxy/session/:id/manifold", post(got_web::proxy_api::manifold))
         .route("/api/proxy/session/:id/snapshot", post(got_web::proxy_api::snapshot))
         .fallback_service(ServeDir::new(&static_dir))
         .layer(cors)

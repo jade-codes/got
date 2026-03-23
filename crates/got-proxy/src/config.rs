@@ -47,6 +47,16 @@ pub struct ProxyConfig {
     /// EWMA decay factor for recency-weighted term profiles.
     /// α ∈ (0, 1]; higher = more weight on recent observations.
     pub ewma_alpha: f32,
+
+    // --- Manifold analysis ---
+    /// k for k-NN manifold density estimation.
+    pub manifold_k: usize,
+    /// Log-density below this → off-manifold. Used in deviation signal 4.
+    pub manifold_density_threshold: f32,
+    /// Weight for manifold density signal in combined deviation score.
+    pub weight_manifold: f32,
+    /// Minimum stored activations before manifold analysis activates.
+    pub min_activations_for_manifold: usize,
 }
 
 impl Default for ProxyConfig {
@@ -69,6 +79,11 @@ impl Default for ProxyConfig {
             max_values_per_observation: 10,
 
             ewma_alpha: 0.1,
+
+            manifold_k: 5,
+            manifold_density_threshold: -10.0,
+            weight_manifold: 0.0, // disabled by default — set > 0 to enable
+            min_activations_for_manifold: 20,
         }
     }
 }

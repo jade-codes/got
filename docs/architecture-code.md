@@ -89,13 +89,13 @@ layer adds one guarantee on top of the layers below it.
 │         │                     (v1: original fields)                    │
 │         v                     (v2: + parent hash,                      │
 │  serialise_for_signing()       geo hash, drift)                        │
-│  (v1, v2, v3 branches)       (v3: + causal scores,                    │
+│  (v1–v4 branches)            (v3: + causal scores,                    │
 │                                intervention_delta,                     │
 │  attestation_hash()            causal_flag)                            │
-│  sha256(canonical bytes)                                               │
-│                                                                        │
+│  sha256(canonical bytes)     (v4: + density_reading,                   │
+│                                curvature_reading)                      │
 │  merkle_root()               is_supported_schema()                     │
-│  (RFC 6962 domain sep)       {1, 2, 3} → true                         │
+│  (RFC 6962 domain sep)       {1, 2, 3, 4} → true                     │
 │                                                                        │
 └───────────────┬────────────────────────────────────────────────────────┘
                 │
@@ -121,6 +121,14 @@ layer adds one guarantee on top of the layers below it.
 │    compute_consistency()       MultiLayerCausalResult                  │
 │    is_causal flag              ProbeLibrary { probes, sample_size }    │
 │                                                                        │
+│  ─── experiment.rs ───────────────────────────────────────            │
+│  InterventionExperiment          ExperimentReport (attestable)          │
+│    lerp between activation       InterpolationStep {                    │
+│    vectors, forward each           causal_distance, log_density,       │
+│    through ModelHandle             output_entropy, incoherence_score,   │
+│  ExperimentConfig                  model_confidence, on_manifold }      │
+│    steps, density_threshold                                             │
+│                                                                        │
 │  ─── hooks.rs ─────────────────────────────────────────────            │
 │  MeasurementHook trait         MeasurementSidecar                      │
 │    on_activation()               windowed probe sampling               │
@@ -137,7 +145,7 @@ layer adds one guarantee on top of the layers below it.
 │                                                                        │
 │  ┌─ geometry.rs ─────────────────────────────┐                         │
 │  │                                           │  GeometricAttestation   │
-│  │  CausalGeometry                           │    schema_version 1|2|3 │
+│  │  CausalGeometry                           │  schema_version 1|2|3|4 │
 │  │    ├── from_unembedding(U, eps)           │    S-21: model_hash     │
 │  │    │     Phi = U^T U  (+eps*I)            │      Option<[u8; 32]>   │
 │  │    ├── from_raw_gram(data, d)             │    parent_attest_hash   │
@@ -150,13 +158,26 @@ layer adds one guarantee on top of the layers below it.
 │  │                                           │    directional_drifts   │
 │  └───────────────────────────────────────────┘    probe_commitment     │
 │                                                    signature [u8;64]   │
+│  ┌─ manifold.rs ────────────────────────────┐                         │
+│  │  ValueManifold                          │  density_reading         │
+│  │    ├── new(points, geometry, config)     │  curvature_reading       │
+│  │    │     precompute pairwise d_Phi      │                          │
+│  │    ├── density_map()  → DensityReading  │                          │
+│  │    ├── curvature_map() → CurvatureRead  │                          │
+│  │    └── query_log_density(point, geom)   │                          │
+│  │  ManifoldConfig { k }                   │                          │
+│  │  PointDensity { log_density, dim }      │                          │
+│  │  PointCurvature { curvature, count }    │                          │
+│  └─────────────────────────────────────────┘                          │
+│                                                                        │
 │  UnsignedAttestation (newtype wrapper)                                 │
 │  CausalScoreRecord  DirectionalDrift                                   │
 │  UnembeddingMatrix  LayerActivation                                    │
 │  Precision          InnerProduct                                       │
+│  euclidean_cosine() (shared utility in geometry.rs)                    │
 │  sha256()  (canonical hash utility)                                    │
 │  hex32/hex64/optional_hex32 serde (ASCII-hex validated)                │
-│  SCHEMA_VERSION / _2 / _3 constants                                    │
+│  SCHEMA_VERSION / _2 / _3 / _4 constants                              │
 │                                                                        │
 └─────────────────────────────────────────────────────────────────────────┘
                       ^                ^

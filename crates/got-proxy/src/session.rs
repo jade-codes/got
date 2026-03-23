@@ -11,6 +11,8 @@ use got_core::geometry::CausalGeometry;
 use got_incoherence::coherence::causal_cosine;
 use got_incoherence::embeddings::EmbeddingSource;
 
+use got_core::manifold::{DensityReading, CurvatureReading, ManifoldConfig, ValueManifold};
+
 use crate::attestation::{
     sign_attestation, AttestationSummary, AttestationType, BehavioralAttestation,
     BEHAVIORAL_SCHEMA_VERSION,
@@ -61,10 +63,7 @@ pub struct ProxySession<S: ValueSpaceStore, E: EmbeddingSource> {
     signing_key: SigningKey,
     /// Reference geometry (Φ = U^T U) from the open-source reference model.
     geometry: CausalGeometry,
-    /// Value term embeddings from the reference model.
-    term_embeddings: HashMap<String, Vec<f32>>,
-    /// Embedding source for value term lookup.
-    #[allow(dead_code)]
+    /// Embedding source for value term lookup and enumeration.
     embedding_source: E,
     /// The evolving value space.
     value_space: BehavioralValueSpace,
@@ -82,6 +81,10 @@ pub struct ProxySession<S: ValueSpaceStore, E: EmbeddingSource> {
     cumulative_drift: f64,
     /// Deviation history.
     deviation_history: Vec<DeviationReport>,
+    /// Stored activation vectors for manifold analysis.
+    activation_history: Vec<Vec<f32>>,
+    /// Per-term log-densities from the most recent snapshot. Empty before first snapshot.
+    latest_term_densities: HashMap<String, f32>,
 }
 
 impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
@@ -91,7 +94,6 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
         target_model_id: String,
         signing_key: SigningKey,
         geometry: CausalGeometry,
-        term_embeddings: HashMap<String, Vec<f32>>,
         embedding_source: E,
         config: ProxyConfig,
         store: S,
@@ -104,7 +106,6 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
             target_model_id,
             signing_key,
             geometry,
-            term_embeddings,
             embedding_source,
             value_space,
             config,
@@ -114,6 +115,8 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
             latest_deviation: None,
             cumulative_drift: 0.0,
             deviation_history: Vec::new(),
+            activation_history: Vec::new(),
+            latest_term_densities: HashMap::new(),
         })
     }
 
@@ -123,16 +126,21 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
     /// model's geometry. The session detects values, updates the value space,
     /// and runs deviation detection.
     pub fn observe(&mut self, output_embedding: &[f32]) -> Result<ObservationResult, ProxyError> {
+        // Store activation for manifold analysis
+        self.activation_history.push(output_embedding.to_vec());
+
         // Detect values: project output against each term embedding using causal cosine
         let mut detected = Vec::new();
         let mut scores = HashMap::new();
 
-        // Compute raw projections
+        // Compute raw projections against all known terms
         let mut raw_scores: Vec<(String, f64)> = Vec::new();
-        for (term, term_emb) in &self.term_embeddings {
-            match causal_cosine(output_embedding, term_emb, &self.geometry) {
-                Ok(cos) => raw_scores.push((term.clone(), cos as f64)),
-                Err(_) => continue,
+        for term in self.embedding_source.available_terms() {
+            if let Some(term_emb) = self.embedding_source.embed(&term) {
+                match causal_cosine(output_embedding, &term_emb, &self.geometry) {
+                    Ok(cos) => raw_scores.push((term, cos as f64)),
+                    Err(_) => continue,
+                }
             }
         }
 
@@ -180,10 +188,10 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
                 let term_a = &detected_terms[i];
                 let term_b = &detected_terms[j];
                 if let (Some(emb_a), Some(emb_b)) = (
-                    self.term_embeddings.get(term_a),
-                    self.term_embeddings.get(term_b),
+                    self.embedding_source.embed(term_a),
+                    self.embedding_source.embed(term_b),
                 ) {
-                    if let Ok(cos) = causal_cosine(emb_a, emb_b, &self.geometry) {
+                    if let Ok(cos) = causal_cosine(&emb_a, &emb_b, &self.geometry) {
                         pairwise_cosines
                             .insert((term_a.clone(), term_b.clone()), cos as f64);
                     }
@@ -192,9 +200,17 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
         }
         self.value_space.update_pairwise(&pairwise_cosines);
 
+        // Signal 4: manifold density (if enough activations collected)
+        let manifold_density_score = self.compute_manifold_density_signal();
+
         // Run deviation detection
-        let deviation_report =
-            detect_deviation(&scores, &pairwise_cosines, &self.value_space, &self.config);
+        let deviation_report = detect_deviation(
+            &scores,
+            &pairwise_cosines,
+            &self.value_space,
+            &self.config,
+            manifold_density_score,
+        );
 
         let deviation = if deviation_report.baseline_sufficient {
             self.cumulative_drift += deviation_report.profile_drift;
@@ -210,6 +226,100 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
             deviation,
             observation_count: self.value_space.observation_count,
         })
+    }
+
+    /// Compute Signal 4: is the latest activation off-manifold?
+    ///
+    /// Uses a sliding window of recent activations (capped at 4× min_activations)
+    /// to keep cost bounded. Returns 0.0 if manifold analysis is disabled or
+    /// there are insufficient activations.
+    fn compute_manifold_density_signal(&self) -> f64 {
+        if self.config.weight_manifold <= 0.0 {
+            return 0.0;
+        }
+        let k = self.config.manifold_k;
+        let min_n = self.config.min_activations_for_manifold.max(k + 1);
+        if self.activation_history.len() < min_n {
+            return 0.0;
+        }
+
+        // Use a sliding window: at most 4× min_activations recent points
+        let history_len = self.activation_history.len();
+        let window_cap = min_n * 4;
+        let window_start = if history_len > window_cap + 1 {
+            history_len - window_cap - 1
+        } else {
+            0
+        };
+
+        // Build manifold from the window, excluding the latest observation
+        let manifold_points: Vec<Vec<f32>> =
+            self.activation_history[window_start..history_len - 1].to_vec();
+        if manifold_points.len() < k + 1 {
+            return 0.0;
+        }
+        let manifold = match ValueManifold::new(
+            manifold_points,
+            &self.geometry,
+            ManifoldConfig { k },
+        ) {
+            Ok(m) => m,
+            Err(_) => return 0.0,
+        };
+
+        let d_eff = match manifold.density_map() {
+            Ok(dr) => dr.mean_intrinsic_dim,
+            Err(_) => return 0.0,
+        };
+
+        let latest = &self.activation_history[history_len - 1];
+        match manifold.query_log_density(latest, &self.geometry, d_eff) {
+            Ok(Some(ld)) if ld < self.config.manifold_density_threshold as f32 => 1.0,
+            Ok(Some(_)) => 0.0,
+            _ => 0.0,
+        }
+    }
+
+    /// Build manifold readings from the activation history.
+    ///
+    /// Returns (density, curvature, per-term densities). All None/empty if insufficient data.
+    fn build_manifold_readings(
+        &self,
+    ) -> (
+        Option<DensityReading>,
+        Option<CurvatureReading>,
+        HashMap<String, f32>,
+    ) {
+        let k = self.config.manifold_k;
+        let min_n = self.config.min_activations_for_manifold.max(k + 1);
+        if self.activation_history.len() < min_n {
+            return (None, None, HashMap::new());
+        }
+
+        let manifold = match ValueManifold::new(
+            self.activation_history.clone(),
+            &self.geometry,
+            ManifoldConfig { k },
+        ) {
+            Ok(m) => m,
+            Err(_) => return (None, None, HashMap::new()),
+        };
+
+        let density = manifold.density_map().ok();
+        let curvature = manifold.curvature_map(None).ok();
+
+        // Query each known term's density on the activation manifold
+        let d_eff = density.as_ref().map(|d| d.mean_intrinsic_dim).unwrap_or(2.0);
+        let mut term_densities = HashMap::new();
+        for term in self.embedding_source.available_terms() {
+            if let Some(emb) = self.embedding_source.embed(&term) {
+                if let Ok(Some(ld)) = manifold.query_log_density(&emb, &self.geometry, d_eff) {
+                    term_densities.insert(term, ld);
+                }
+            }
+        }
+
+        (density, curvature, term_densities)
     }
 
     /// Take a snapshot of the current value space and produce a signed attestation.
@@ -254,6 +364,11 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
             _ => None,
         };
 
+        // Build manifold readings from activation history
+        let (density_reading, curvature_reading, term_densities) =
+            self.build_manifold_readings();
+        self.latest_term_densities = term_densities;
+
         let attestation = BehavioralAttestation {
             schema_version: BEHAVIORAL_SCHEMA_VERSION.into(),
             target_model_id: self.target_model_id.clone(),
@@ -270,6 +385,8 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
                 cumulative_drift: self.cumulative_drift,
             },
             deviation,
+            density_reading,
+            curvature_reading,
             signature: [0; 64],
         };
 
@@ -320,6 +437,25 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
     pub fn store(&self) -> &S {
         &self.store
     }
+
+    /// Per-term log-densities from the most recent manifold computation.
+    /// Maps term name → log-density on the activation manifold.
+    /// Empty before any manifold computation or if insufficient activations.
+    pub fn term_densities(&self) -> &HashMap<String, f32> {
+        &self.latest_term_densities
+    }
+
+    /// Produce a signed attestation that includes manifold readings.
+    ///
+    /// Convenience wrapper: creates a Snapshot attestation and returns it
+    /// along with per-term densities (for visualisation).
+    pub fn attest_manifold(
+        &mut self,
+    ) -> Result<(BehavioralAttestation, HashMap<String, f32>), ProxyError> {
+        let attestation = self.snapshot_and_attest(AttestationType::Snapshot)?;
+        let term_densities = self.latest_term_densities.clone();
+        Ok((attestation, term_densities))
+    }
 }
 
 #[cfg(test)]
@@ -344,7 +480,7 @@ mod tests {
         embeddings.insert("courage".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
         embeddings.insert("fairness".to_string(), vec![0.0, 0.0, 1.0, 0.0]);
 
-        let source = PrecomputedEmbeddings::new(embeddings.clone()).unwrap();
+        let source = PrecomputedEmbeddings::new(embeddings).unwrap();
         let sk = SigningKey::from_bytes(&[42u8; 32]);
 
         ProxySession::new(
@@ -352,7 +488,6 @@ mod tests {
             "test-model".into(),
             sk,
             geometry,
-            embeddings,
             source,
             ProxyConfig::default(),
             MemoryValueSpaceStore::new(),

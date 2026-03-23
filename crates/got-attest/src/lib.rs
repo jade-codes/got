@@ -30,13 +30,17 @@ pub enum AttestationError {
     TimestampFuture { delta: u64, max: u64 },
 }
 
-/// Supported schema versions (v1 = original, v2 = chained attestation, v3 = causal intervention).
+/// Supported schema versions (v1 = original, v2 = chained attestation, v3 = causal intervention, v4 = manifold density).
 const SUPPORTED_SCHEMA_V1: u16 = 1;
 const SUPPORTED_SCHEMA_V2: u16 = 2;
 const SUPPORTED_SCHEMA_V3: u16 = 3;
+const SUPPORTED_SCHEMA_V4: u16 = 4;
 
 fn is_supported_schema(v: u16) -> bool {
-    v == SUPPORTED_SCHEMA_V1 || v == SUPPORTED_SCHEMA_V2 || v == SUPPORTED_SCHEMA_V3
+    v == SUPPORTED_SCHEMA_V1
+        || v == SUPPORTED_SCHEMA_V2
+        || v == SUPPORTED_SCHEMA_V3
+        || v == SUPPORTED_SCHEMA_V4
 }
 
 /// Sign an attestation. Serialises all fields except `signature` to canonical
@@ -292,6 +296,80 @@ pub fn serialise_for_signing(a: &GeometricAttestation) -> Result<Vec<u8>, Attest
         }
     }
 
+    // === v4 extension fields (manifold analysis) ===
+    if a.schema_version >= SUPPORTED_SCHEMA_V4 {
+        // density_reading: Option<DensityReading>
+        match &a.density_reading {
+            None => buf.push(0x00),
+            Some(dr) => {
+                buf.push(0x01);
+                write_u32(&mut buf, dr.points.len() as u32);
+                for p in &dr.points {
+                    write_f32(&mut buf, p.log_density, "density_reading.log_density")?;
+                    write_f32(&mut buf, p.intrinsic_dim, "density_reading.intrinsic_dim")?;
+                }
+                write_f32(
+                    &mut buf,
+                    dr.mean_intrinsic_dim,
+                    "density_reading.mean_intrinsic_dim",
+                )?;
+                write_f32(
+                    &mut buf,
+                    dr.std_intrinsic_dim,
+                    "density_reading.std_intrinsic_dim",
+                )?;
+                write_f32(
+                    &mut buf,
+                    dr.mean_log_density,
+                    "density_reading.mean_log_density",
+                )?;
+                write_u32(&mut buf, dr.k);
+                write_u32(&mut buf, dr.num_degenerate);
+            }
+        }
+
+        // curvature_reading: Option<CurvatureReading>
+        match &a.curvature_reading {
+            None => buf.push(0x00),
+            Some(cr) => {
+                buf.push(0x01);
+                write_u32(&mut buf, cr.points.len() as u32);
+                for p in &cr.points {
+                    write_f32(
+                        &mut buf,
+                        p.sectional_curvature,
+                        "curvature_reading.sectional_curvature",
+                    )?;
+                    write_u32(&mut buf, p.num_triangles);
+                }
+                write_f32(
+                    &mut buf,
+                    cr.mean_curvature,
+                    "curvature_reading.mean_curvature",
+                )?;
+                write_f32(
+                    &mut buf,
+                    cr.std_curvature,
+                    "curvature_reading.std_curvature",
+                )?;
+                // curvature_uncertainty_correlation: Option<f32>
+                match cr.curvature_uncertainty_correlation {
+                    None => buf.push(0x00),
+                    Some(r) => {
+                        buf.push(0x01);
+                        write_f32(
+                            &mut buf,
+                            r,
+                            "curvature_reading.curvature_uncertainty_correlation",
+                        )?;
+                    }
+                }
+                write_u32(&mut buf, cr.k);
+                write_u32(&mut buf, cr.num_degenerate);
+            }
+        }
+    }
+
     // NOTE: signature is excluded.
 
     Ok(buf)
@@ -474,6 +552,8 @@ mod tests {
             sequence_number: 0,
             directional_drifts: vec![],
             probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0u8; 64],
         }
     }

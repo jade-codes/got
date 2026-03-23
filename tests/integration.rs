@@ -115,6 +115,8 @@ fn produce_attestation(timestamp: u64) -> GeometricAttestation {
         sequence_number: 0,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
 
@@ -331,6 +333,8 @@ fn produce_attestation_for_profile(profile: &ModelProfile, timestamp: u64) -> Ge
         sequence_number: 0,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
 
@@ -719,6 +723,8 @@ fn produce_causal_attestation(timestamp: u64) -> GeometricAttestation {
         sequence_number: 0,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
 
@@ -882,6 +888,8 @@ fn v2_attestation_still_verifiable_after_v3() {
         sequence_number: 0,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
 
@@ -992,6 +1000,8 @@ fn causal_attestation_flow_end_to_end() {
         sequence_number: 0,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
 
@@ -1463,6 +1473,8 @@ fn wire_make_v1_seq(key: &SigningKey, seq: u64) -> GeometricAttestation {
         sequence_number: seq,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
     assemble_and_sign(a, key).unwrap()
@@ -1506,6 +1518,8 @@ fn wire_make_v2_child_seq(
         sequence_number: seq,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
     assemble_and_sign(a, key).unwrap()
@@ -1687,6 +1701,8 @@ fn wire_chain_walk_broken_link_rejected() {
         sequence_number: 1,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
     bad = assemble_and_sign(bad, &key).unwrap();
@@ -2217,6 +2233,8 @@ fn store_attestation(
         sequence_number: 0,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
     let payload = serialise_for_signing(&a).unwrap();
@@ -2631,6 +2649,8 @@ fn phase13_verify_chain_rejects_duplicate_seq() {
         sequence_number: 0,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
     let a0 = assemble_and_sign(a0, &key).unwrap();
@@ -2660,6 +2680,8 @@ fn phase13_verify_chain_rejects_duplicate_seq() {
         sequence_number: 0, // DUPLICATE: should be 1
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
     let a1 = assemble_and_sign(a1, &key).unwrap();
@@ -2892,6 +2914,8 @@ fn phase13_directional_drifts_in_signed_payload() {
         sequence_number: 0,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
     let mut signed = assemble_and_sign(attest, &key).unwrap();
@@ -3049,6 +3073,8 @@ fn sec_model_hash_option_none_is_distinct() {
         sequence_number: 0,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
     a_none = assemble_and_sign(a_none, &key).unwrap();
@@ -3082,6 +3108,8 @@ fn sec_model_hash_option_none_is_distinct() {
         sequence_number: 0,
         directional_drifts: vec![],
         probe_commitment: None,
+        density_reading: None,
+        curvature_reading: None,
         signature: [0u8; 64],
     };
     a_zero = assemble_and_sign(a_zero, &key).unwrap();

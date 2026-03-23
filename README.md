@@ -30,36 +30,38 @@ This causal inner product weights directions in the residual stream by how much 
 - **Calibrated**: Platt scaling + ECE metric ensure confidence values are meaningful, not just ranked
 - **PKI-backed**: Agent certificates with expiry, revocation (CRL), and key rotation ceremonies
 - **Zero-training coherence**: Value incoherence detection needs only the unembedding matrix — no probes, no labels, no SGD
-- **Closed-source monitoring**: Proxy architecture monitors models with no internal access — behavioral value profiling with 3-signal deviation detection
+- **Closed-source monitoring**: Proxy architecture monitors models with no internal access — behavioral value profiling with 4-signal deviation detection (including manifold density)
+- **Manifold geometry**: k-NN density estimation and sectional curvature under the causal metric — characterises the shape of the value activation space
+- **Interpolation experiments**: Linear interpolation between activation vectors with per-step incoherence scoring, manifold membership testing, and model confidence tracking
 
 ## Architecture
 
 ```
-got-core            Layer 0 — Core types, causal geometry (Gram matrix, inner product)
+got-core            Layer 0 — Core types, causal geometry, manifold density & curvature
   ↑           ↑
-got-probe     got-attest       Layer 1–2 — Probe training/inference, attestation signing
+got-probe     got-attest       Layer 1–2 — Probe training, intervention experiments, attestation signing
   ↑           ↑
 got-wire      got-store        Layer 3 — Wire protocol, attestation storage, behavioral exchange
   ↑           ↑
 got-enclave   got-incoherence  Layer 4 — Enclave boundary, coherence analysis
   ↑           ↑
-got-proxy     got-cli          Layer 5a — Proxy architecture for closed-source models
+got-proxy     got-cli          Layer 5a — Proxy architecture with manifold-aware deviation detection
   ↑           ↑
 got-web                        Layer 5b — Unified web UI with LLM chat + value monitoring
 ```
 
 | Crate | Purpose |
 |---|---|
-| `got-core` | `CausalGeometry`, `GeometricAttestation`, `LayerActivation`, precision types, drift computation |
-| `got-probe` | Linear probe training (SGD under causal IP), Platt calibration, ECE metric, inference, causal intervention checks, measurement hooks and sidecar |
+| `got-core` | `CausalGeometry`, `GeometricAttestation`, `LayerActivation`, precision types, drift computation, `ValueManifold` (k-NN density, intrinsic dimension, sectional curvature under causal metric) |
+| `got-probe` | Linear probe training (SGD under causal IP), Platt calibration, ECE metric, inference, causal intervention checks, measurement hooks and sidecar, `InterventionExperiment` (interpolation with incoherence scoring and manifold membership) |
 | `got-attest` | Attestation assembly, Ed25519 signing/verification, Merkle roots, causal consistency validation |
 | `got-wire` | Framed wire protocol, exchange envelopes, chain verification, trust registry, PKI certificates, CRL, behavioral exchange protocol |
 | `got-store` | Attestation persistence (in-memory and on-disk with atomic writes), audit reports |
 | `got-enclave` | TEE abstraction — signing keys never leave the enclave boundary (software mock for PoC) |
 | `got-incoherence` | Zero-training coherence analysis: pairwise causal cosines, contradiction/redundancy detection, SVG heatmap and chord diagram generation |
-| `got-proxy` | **Proxy architecture for closed-source models**: behavioral value space (Welford + EWMA), 3-signal deviation detection, Ed25519 behavioral attestations (schema "B1"), memory/file storage |
+| `got-proxy` | **Proxy architecture for closed-source models**: behavioral value space (Welford + EWMA), 4-signal deviation detection (term z-score, profile drift, pairwise disruption, manifold density), Ed25519 behavioral attestations with manifold density/curvature readings, memory/file storage |
 | `got-cli` | CLI with `keygen`, `train`, `attest`, `verify`, `checkpoint`, `drift`, `calibration-report`, `issue-cert`, `revoke-cert`, `rotate-key`, `coherence-check` subcommands |
-| `got-web` | Axum web server with unified D3.js frontend: LLM chat relay (Ollama/OpenAI/Anthropic), live value monitoring via proxy, conversation coherence analysis with 5 visualizations |
+| `got-web` | Axum web server with unified D3.js frontend: LLM chat relay (Ollama/OpenAI/Anthropic), live value monitoring via proxy, conversation coherence analysis with 6 visualizations (chord, heatmap, 3D sphere with density coloring, contradictions, redundancies, manifold geometry) |
 
 ## Getting Started
 
@@ -297,8 +299,9 @@ cargo run --release -p got-web -- --synthetic
 The unified UI supports:
 - **Live chat**: configure an LLM provider (Ollama local, OpenAI, Anthropic) in the settings bar, type messages, and the proxy monitors the AI's responses for value alignment drift
 - **Demo replay**: click "Load Demo" to replay a pre-built conversation through the proxy pipeline
-- **5 visualizations**: chord diagram, heatmap, 3D MDS sphere, contradiction cards, redundancy cards — all updating per turn
-- **Deviation monitoring**: 3-signal deviation strip (term z-score shift, profile cosine drift, pairwise disruption) with baseline progress indicator
+- **6 visualizations**: chord diagram, heatmap, 3D MDS sphere (with manifold density coloring), contradiction cards, redundancy cards, manifold geometry tab — all updating per turn
+- **Deviation monitoring**: 4-signal deviation strip (term z-score shift, profile cosine drift, pairwise disruption, manifold density) with manifold health badge
+- **Attested manifold analysis**: on-demand computation of manifold density, intrinsic dimension, and sectional curvature — every result is Ed25519-signed and chained
 
 **Endpoints:**
 
@@ -313,6 +316,7 @@ The unified UI supports:
 | `POST` | `/api/proxy/session/:id/observe` | Submit an observation — returns detected values + deviation report |
 | `GET` | `/api/proxy/session/:id/status` | Value space summary + latest deviation |
 | `GET` | `/api/proxy/session/:id/history` | Deviation history |
+| `POST` | `/api/proxy/session/:id/manifold` | Compute manifold geometry + signed behavioral attestation (density, curvature, per-term densities) |
 | `POST` | `/api/proxy/session/:id/snapshot` | Force snapshot + signed behavioral attestation |
 
 ## Trust Tiers
@@ -325,6 +329,7 @@ The attestation schema supports four progressive levels of trust:
 | **Tier 1 — Signature** | v1 | Ed25519 signature over deterministic canonical bytes |
 | **Tier 2 — Consistency** | v2 | Signature + parent chain hash + geometry drift bounds + coverage flags |
 | **Tier 3 — Reproduction** | v3 | Full re-extraction + re-probing + causal intervention scores + bitwise match |
+| **Tier 3+ — Manifold** | v4 | Tier 3 + manifold density reading + sectional curvature reading |
 
 Tier 0 is specifically for closed-source models (GPT-4, Claude, Gemini) where internal activations are inaccessible. The proxy uses a reference model's geometry as a measurement instrument, building a behavioral value profile from the model's text outputs.
 
@@ -353,6 +358,7 @@ The `scripts/` directory contains tools for model activation extraction and anal
 | Script | Purpose |
 |---|---|
 | `extract_activations.py` | Extract residual-stream activations and unembedding matrix from any HuggingFace model |
+| `inject_and_generate.py` | Inject an activation vector at a transformer layer and generate text (extraction-and-injection counterpart) |
 | `extract_gpt2_demo.py` | Extract GPT-2 specific data for the demo pipeline |
 | `build_gpt2_demo.py` | Build the complete GPT-2 demo dataset (activations, embeddings, vocabulary) |
 | `save_vocab.py` | Save a model's vocabulary as JSON |
@@ -402,9 +408,9 @@ Those are the hard problems. This is the plumbing that proves the hard problems 
 
 ## Project Stats
 
-- **10 crates** | **25+ modules** | **11,000+ lines of Rust**
-- **350+ tests** (unit + integration) | **0 compiler warnings**
-- **15 Python scripts** for model extraction and analysis
+- **10 crates** | **30+ modules** | **21,000+ lines of Rust**
+- **390 tests** (unit + integration) | **0 new compiler warnings**
+- **16 Python scripts** for model extraction, injection, and analysis
 - **13 static frontend files** (modular ES modules + CSS)
 - **12/12 security issues mitigated** (critical and high severity)
 

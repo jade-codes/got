@@ -56,7 +56,12 @@ pub struct DeviationReport {
     pub profile_drift: f64,
     /// Signal 3: normalised pairwise relationship disruption score ∈ [0, 1].
     pub relationship_score: f64,
-    /// Weighted combination of the three signals.
+    /// Signal 4: manifold density anomaly score ∈ [0, 1].
+    /// Fraction of recent observations that fall off-manifold.
+    /// 0 when manifold analysis is disabled or insufficient data.
+    #[serde(default)]
+    pub manifold_density_score: f64,
+    /// Weighted combination of all signals.
     pub combined_score: f64,
     /// Verdict based on combined score.
     pub verdict: DeviationVerdict,
@@ -188,14 +193,16 @@ fn signal_pairwise_disruption(
     (score.min(1.0), disrupted)
 }
 
-/// Run the full 3-signal deviation detection algorithm.
+/// Run the full deviation detection algorithm (3 signals + optional manifold signal).
 ///
-/// Returns `None` if the baseline has insufficient observations.
+/// `manifold_density_score`: fraction of recent observations that are off-manifold.
+/// Pass 0.0 when manifold analysis is not available.
 pub fn detect_deviation(
     current_scores: &HashMap<String, f64>,
     current_pairwise: &HashMap<(String, String), f64>,
     baseline: &BehavioralValueSpace,
     config: &ProxyConfig,
+    manifold_density_score: f64,
 ) -> DeviationReport {
     let baseline_sufficient =
         baseline.observation_count >= config.min_observations_for_detection;
@@ -205,6 +212,7 @@ pub fn detect_deviation(
             term_score: 0.0,
             profile_drift: 0.0,
             relationship_score: 0.0,
+            manifold_density_score: 0.0,
             combined_score: 0.0,
             verdict: DeviationVerdict::WithinBaseline,
             flagged_terms: Vec::new(),
@@ -222,7 +230,8 @@ pub fn detect_deviation(
 
     let combined_score = config.weight_term as f64 * term_score
         + config.weight_profile as f64 * profile_drift_normalised
-        + config.weight_pairwise as f64 * relationship_score;
+        + config.weight_pairwise as f64 * relationship_score
+        + config.weight_manifold as f64 * manifold_density_score;
 
     let verdict = if combined_score < config.threshold_within as f64 {
         DeviationVerdict::WithinBaseline
@@ -236,6 +245,7 @@ pub fn detect_deviation(
         term_score,
         profile_drift,
         relationship_score,
+        manifold_density_score,
         combined_score,
         verdict,
         flagged_terms,
@@ -294,7 +304,7 @@ mod tests {
                 .into_iter()
                 .collect();
 
-        let report = detect_deviation(&current, &pairwise, &baseline, &config);
+        let report = detect_deviation(&current, &pairwise, &baseline, &config, 0.0);
         assert!(report.baseline_sufficient);
         assert_eq!(report.verdict, DeviationVerdict::WithinBaseline);
         assert!(report.flagged_terms.is_empty());
@@ -310,7 +320,7 @@ mod tests {
             [("honesty".into(), 0.0)].into_iter().collect();
         let pairwise = HashMap::new();
 
-        let report = detect_deviation(&current, &pairwise, &baseline, &config);
+        let report = detect_deviation(&current, &pairwise, &baseline, &config, 0.0);
         assert!(!report.baseline_sufficient);
         assert_eq!(report.verdict, DeviationVerdict::WithinBaseline);
     }
@@ -331,7 +341,7 @@ mod tests {
                 .into_iter()
                 .collect();
 
-        let report = detect_deviation(&current, &pairwise, &baseline, &config);
+        let report = detect_deviation(&current, &pairwise, &baseline, &config, 0.0);
         assert!(report.baseline_sufficient);
         assert!(!report.flagged_terms.is_empty());
         assert!(report.combined_score > 0.3);

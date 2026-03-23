@@ -269,3 +269,28 @@
 .top-values-list .term-score { font-family: monospace; font-size: 12px; color: #8b949e; }
 .top-values-list .term-bar { width: 80px; height: 4px; background: #21262d; border-radius: 2px; }
 .top-values-list .term-bar-fill { height: 100%; background: #58a6ff; border-radius: 2px; }
+
+/* Manifold tab */
+.manifold-header {
+  display: flex; align-items: center; gap: 12px; padding: 8px 0;
+  border-bottom: 1px solid #21262d; margin-bottom: 12px;
+}
+.snapshot-btn {
+  padding: 6px 14px; border-radius: 6px; border: 1px solid #30363d;
+  background: #238636; color: #fff; cursor: pointer; font-size: 13px; font-weight: 600;
+}
+.snapshot-btn:hover { background: #2ea043; }
+.snapshot-btn:disabled { opacity: 0.5; cursor: default; }
+.manifold-status { font-size: 12px; color: #8b949e; }
+.manifold-section { margin-bottom: 16px; }
+.manifold-section h3 {
+  font-size: 13px; font-weight: 600; color: #58a6ff; text-transform: uppercase;
+  letter-spacing: 0.5px; margin: 0 0 8px 0;
+}
+.manifold-metric {
+  display: flex; align-items: baseline; gap: 8px; padding: 4px 0;
+  border-bottom: 1px solid #161b22; font-size: 13px;
+}
+.metric-label { color: #8b949e; min-width: 140px; }
+.metric-value { color: #c9d1d9; font-family: monospace; font-weight: 600; }
+.metric-detail { color: #6e7681; font-size: 12px; }

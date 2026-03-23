@@ -37,6 +37,9 @@ pub trait EmbeddingSource {
     /// Look up the embedding for a single term.
     fn embed(&self, term: &str) -> Option<Vec<f32>>;
 
+    /// All term strings this source can resolve.
+    fn available_terms(&self) -> Vec<String>;
+
     /// Embed multiple terms at once. Default: sequential calls to `embed`.
     fn embed_batch(&self, terms: &[&str]) -> Vec<Option<Vec<f32>>> {
         terms.iter().map(|t| self.embed(t)).collect()
@@ -102,6 +105,10 @@ impl EmbeddingSource for UnembeddingLookup {
     fn embed(&self, term: &str) -> Option<Vec<f32>> {
         let key = term.trim().to_lowercase();
         self.vocab.get(&key).map(|&idx| self.row(idx))
+    }
+
+    fn available_terms(&self) -> Vec<String> {
+        self.vocab.keys().cloned().collect()
     }
 }
 
@@ -181,6 +188,10 @@ impl EmbeddingSource for PrecomputedEmbeddings {
     fn embed(&self, term: &str) -> Option<Vec<f32>> {
         let key = term.trim().to_lowercase();
         self.embeddings.get(&key).cloned()
+    }
+
+    fn available_terms(&self) -> Vec<String> {
+        self.embeddings.keys().cloned().collect()
     }
 }
 

@@ -548,13 +548,7 @@ fn compute_trust_scores(turns: &mut [TurnAnalysis]) {
 
 /// Cosine similarity between two embedding vectors.
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a < f32::EPSILON || norm_b < f32::EPSILON {
-        return 0.0;
-    }
-    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+    got_core::geometry::euclidean_cosine(a, b)
 }
 
 /// Compute per-speaker value-profile drift.

@@ -192,6 +192,8 @@ mod tests {
                 cumulative_drift: 0.0,
             },
             deviation: None,
+            density_reading: None,
+            curvature_reading: None,
             signature: [0; 64],
         };
         sign_attestation(att, sk).unwrap()
