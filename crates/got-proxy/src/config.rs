@@ -80,10 +80,10 @@ impl Default for ProxyConfig {
 
             ewma_alpha: 0.1,
 
-            manifold_k: 5,
+            manifold_k: 4,
             manifold_density_threshold: -10.0,
             weight_manifold: 0.0, // disabled by default — set > 0 to enable
-            min_activations_for_manifold: 20,
+            min_activations_for_manifold: 5, // k + 1
         }
     }
 }

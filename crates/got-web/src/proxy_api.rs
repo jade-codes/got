@@ -352,6 +352,14 @@ pub async fn manifold(
         num_degenerate: cr.num_degenerate,
     });
 
+    // Get EWMA activation weights from the value space
+    let term_weights: HashMap<String, f64> = session
+        .value_space()
+        .term_profiles
+        .iter()
+        .map(|(t, p)| (t.clone(), p.ewma))
+        .collect();
+
     Ok(Json(ManifoldResponse {
         attestation_hash: hex_encode(&hash),
         sequence_number: attestation.sequence_number,
@@ -359,6 +367,7 @@ pub async fn manifold(
         manifold_density,
         manifold_curvature,
         term_densities,
+        term_weights,
     }))
 }
 
@@ -373,8 +382,12 @@ pub struct ManifoldResponse {
     pub manifold_density: Option<ManifoldSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifold_curvature: Option<CurvatureSummary>,
+    /// Per-term log-density on the activation manifold.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub term_densities: HashMap<String, f32>,
+    /// Per-term EWMA activation weight (how strongly the model expresses each value).
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub term_weights: HashMap<String, f64>,
 }
 
 /// POST /api/proxy/session/:id/snapshot

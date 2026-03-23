@@ -17,6 +17,7 @@ import { renderContradictions, renderRedundancies } from './analyse/viz-contradi
 import { renderChordDiagram } from './analyse/viz-chord.js';
 import { renderHeatmap } from './analyse/viz-heatmap.js';
 import { renderSphere } from './analyse/viz-sphere.js';
+import { renderManifoldTerrain } from './analyse/viz-manifold.js';
 
 // ---- State ----
 let sessionId = null;
@@ -299,7 +300,7 @@ async function runCoherenceAnalysis() {
     }
 
     // Auto-fetch manifold data (non-blocking)
-    if (sessionId && observationCount >= 20) {
+    if (sessionId && observationCount >= 5) {
       fetchManifold();
     }
   } catch (err) {
@@ -561,35 +562,48 @@ async function fetchManifold() {
 
 function renderManifoldTab(snapshot) {
   const panel = document.getElementById('manifoldContent');
-  let html = '';
+  panel.innerHTML = '';
+
+  if (!snapshot.manifold_density && !snapshot.manifold_curvature) {
+    panel.innerHTML = '<div class="empty-state"><p>Not enough activations for manifold analysis (need 5+)</p></div>';
+    return;
+  }
+
+  // Terrain visualization (uses per-turn pairwise distances for MDS positioning)
+  if (analysis && currentTurn >= 0 && snapshot.term_densities && Object.keys(snapshot.term_densities).length >= 2) {
+    const vizContainer = document.createElement('div');
+    vizContainer.className = 'viz-container';
+    panel.appendChild(vizContainer);
+    renderManifoldTerrain(vizContainer, analysis.turns[currentTurn], snapshot);
+  }
+
+  // Summary metrics below the terrain
+  let html = '<div class="manifold-metrics-row">';
 
   if (snapshot.manifold_density) {
     const d = snapshot.manifold_density;
     html += '<div class="manifold-section"><h3>Density</h3>';
-    html += manifoldMetric('Intrinsic Dimension', d.mean_intrinsic_dim.toFixed(2),
+    html += manifoldMetric('Intrinsic Dim', d.mean_intrinsic_dim.toFixed(2),
       '\u00B1 ' + d.std_intrinsic_dim.toFixed(2));
-    html += manifoldMetric('Mean Log-Density', d.mean_log_density.toFixed(3), '');
-    html += manifoldMetric('Points', d.num_points, d.num_degenerate > 0 ? d.num_degenerate + ' degenerate' : '');
+    html += manifoldMetric('Log-Density', d.mean_log_density.toFixed(3), '');
+    html += manifoldMetric('Points', d.num_points, d.num_degenerate > 0 ? d.num_degenerate + ' degen' : '');
     html += '</div>';
   }
 
   if (snapshot.manifold_curvature) {
     const c = snapshot.manifold_curvature;
     html += '<div class="manifold-section"><h3>Curvature</h3>';
-    html += manifoldMetric('Mean Curvature', c.mean_curvature.toFixed(4),
+    html += manifoldMetric('Mean \u03BA', c.mean_curvature.toFixed(4),
       '\u00B1 ' + c.std_curvature.toFixed(4));
-    const sign = c.mean_curvature > 0.001 ? 'positive (sphere-like)'
-      : c.mean_curvature < -0.001 ? 'negative (saddle-like)' : 'flat';
-    html += manifoldMetric('Geometry', sign, '');
-    html += manifoldMetric('Points', c.num_points, c.num_degenerate > 0 ? c.num_degenerate + ' degenerate' : '');
+    const sign = c.mean_curvature > 0.001 ? 'positive'
+      : c.mean_curvature < -0.001 ? 'negative' : 'flat';
+    html += manifoldMetric('Shape', sign, '');
+    html += manifoldMetric('Points', c.num_points, c.num_degenerate > 0 ? c.num_degenerate + ' degen' : '');
     html += '</div>';
   }
 
-  if (!snapshot.manifold_density && !snapshot.manifold_curvature) {
-    html = '<div class="empty-state"><p>Not enough activations for manifold analysis (need 20+)</p></div>';
-  }
-
-  panel.innerHTML = html;
+  html += '</div>';
+  panel.insertAdjacentHTML('beforeend', html);
 }
 
 function manifoldMetric(label, value, detail) {

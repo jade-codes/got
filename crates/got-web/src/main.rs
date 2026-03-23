@@ -72,13 +72,12 @@ struct Args {
 }
 
 // Default value terms to look up in any model's vocabulary.
+// 13 terms across 5 opposition axes + 2 standalone, chosen for
+// independence (no redundant pairs like equality/equity or honesty/integrity).
 const VALUE_TERMS: &[&str] = &[
-    "accountability", "bravery", "compassion", "courage", "cowardice",
-    "creativity", "cruelty", "efficiency", "empathy", "equality",
-    "equity", "fairness", "freedom", "honesty", "humility",
-    "innovation", "integrity", "justice", "loyalty", "openness",
-    "oppression", "resilience", "responsibility", "secrecy",
-    "tradition", "transparency", "truthfulness", "wisdom",
+    "compassion", "courage", "cowardice", "cruelty",
+    "fairness", "freedom", "honesty", "innovation",
+    "oppression", "secrecy", "tradition", "transparency", "wisdom",
 ];
 
 /// Return the demo conversation (pre-built scenario with message embeddings).
