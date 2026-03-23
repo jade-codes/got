@@ -30,6 +30,7 @@ This causal inner product weights directions in the residual stream by how much 
 - **Calibrated**: Platt scaling + ECE metric ensure confidence values are meaningful, not just ranked
 - **PKI-backed**: Agent certificates with expiry, revocation (CRL), and key rotation ceremonies
 - **Zero-training coherence**: Value incoherence detection needs only the unembedding matrix — no probes, no labels, no SGD
+- **Closed-source monitoring**: Proxy architecture monitors models with no internal access — behavioral value profiling with 3-signal deviation detection
 
 ## Architecture
 
@@ -38,11 +39,13 @@ got-core            Layer 0 — Core types, causal geometry (Gram matrix, inner 
   ↑           ↑
 got-probe     got-attest       Layer 1–2 — Probe training/inference, attestation signing
   ↑           ↑
-got-wire      got-store        Layer 3 — Wire protocol for agent exchange, attestation storage
+got-wire      got-store        Layer 3 — Wire protocol, attestation storage, behavioral exchange
   ↑           ↑
 got-enclave   got-incoherence  Layer 4 — Enclave boundary, coherence analysis
   ↑           ↑
-got-cli       got-web          Layer 5 — CLI and web server
+got-proxy     got-cli          Layer 5a — Proxy architecture for closed-source models
+  ↑           ↑
+got-web                        Layer 5b — Unified web UI with LLM chat + value monitoring
 ```
 
 | Crate | Purpose |
@@ -50,12 +53,13 @@ got-cli       got-web          Layer 5 — CLI and web server
 | `got-core` | `CausalGeometry`, `GeometricAttestation`, `LayerActivation`, precision types, drift computation |
 | `got-probe` | Linear probe training (SGD under causal IP), Platt calibration, ECE metric, inference, causal intervention checks, measurement hooks and sidecar |
 | `got-attest` | Attestation assembly, Ed25519 signing/verification, Merkle roots, causal consistency validation |
-| `got-wire` | Framed wire protocol, exchange envelopes, chain verification, trust registry, PKI certificates, CRL |
+| `got-wire` | Framed wire protocol, exchange envelopes, chain verification, trust registry, PKI certificates, CRL, behavioral exchange protocol |
 | `got-store` | Attestation persistence (in-memory and on-disk with atomic writes), audit reports |
 | `got-enclave` | TEE abstraction — signing keys never leave the enclave boundary (software mock for PoC) |
 | `got-incoherence` | Zero-training coherence analysis: pairwise causal cosines, contradiction/redundancy detection, SVG heatmap and chord diagram generation |
+| `got-proxy` | **Proxy architecture for closed-source models**: behavioral value space (Welford + EWMA), 3-signal deviation detection, Ed25519 behavioral attestations (schema "B1"), memory/file storage |
 | `got-cli` | CLI with `keygen`, `train`, `attest`, `verify`, `checkpoint`, `drift`, `calibration-report`, `issue-cert`, `revoke-cert`, `rotate-key`, `coherence-check` subcommands |
-| `got-web` | Axum web server with D3.js frontend for conversational incoherence visualisation; supports real model (GPT-2) and synthetic demo modes |
+| `got-web` | Axum web server with unified D3.js frontend: LLM chat relay (Ollama/OpenAI/Anthropic), live value monitoring via proxy, conversation coherence analysis with 5 visualizations |
 
 ## Getting Started
 
@@ -276,9 +280,9 @@ cargo run --release -p got-cli -- coherence-check \
 
 Output formats: `text` (default), `json`, `svg-heatmap`, `svg-chord`.
 
-#### Web Visualiser
+#### Web Visualiser & Live Value Monitor
 
-`got-web` provides an axum server with a D3.js single-page frontend for interactive conversational incoherence analysis.
+`got-web` provides an axum server with a unified D3.js single-page frontend. You can chat with an AI model through the proxy and watch value coherence in real time, or replay a demo conversation through the same pipeline.
 
 ```bash
 # Real model mode (GPT-2 unembedding + vocabulary)
@@ -290,25 +294,39 @@ cargo run --release -p got-web -- \
 cargo run --release -p got-web -- --synthetic
 ```
 
+The unified UI supports:
+- **Live chat**: configure an LLM provider (Ollama local, OpenAI, Anthropic) in the settings bar, type messages, and the proxy monitors the AI's responses for value alignment drift
+- **Demo replay**: click "Load Demo" to replay a pre-built conversation through the proxy pipeline
+- **5 visualizations**: chord diagram, heatmap, 3D MDS sphere, contradiction cards, redundancy cards — all updating per turn
+- **Deviation monitoring**: 3-signal deviation strip (term z-score shift, profile cosine drift, pairwise disruption) with baseline progress indicator
+
 **Endpoints:**
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | Single-page D3.js visualisation |
+| `GET` | `/` | Unified single-page application (static files) |
 | `GET` | `/api/demo-conversation` | Returns a pre-built conversation with per-message embeddings |
-| `POST` | `/api/conversation/analyse` | Analyses a conversation: per-turn value detection, coherence scores, contradiction tracking, speaker influence assessment |
-
-The analysis endpoint projects message embeddings against value terms using the causal inner product, accumulates detected values turn by turn, and returns per-turn coherence, speaker drift, influence scores, and an overall manipulation assessment.
+| `POST` | `/api/conversation/analyse` | Per-turn value detection, coherence scores, contradiction tracking, speaker influence assessment |
+| `POST` | `/api/embed` | Text-to-embedding via reference model vocabulary (bag-of-words) |
+| `POST` | `/api/chat` | Relay to LLM provider (Ollama/OpenAI/Anthropic) — API key per-request, never stored |
+| `POST` | `/api/proxy/session` | Create a proxy monitoring session |
+| `POST` | `/api/proxy/session/:id/observe` | Submit an observation — returns detected values + deviation report |
+| `GET` | `/api/proxy/session/:id/status` | Value space summary + latest deviation |
+| `GET` | `/api/proxy/session/:id/history` | Deviation history |
+| `POST` | `/api/proxy/session/:id/snapshot` | Force snapshot + signed behavioral attestation |
 
 ## Trust Tiers
 
-The attestation schema supports three progressive levels of trust:
+The attestation schema supports four progressive levels of trust:
 
 | Tier | Schema | What It Proves |
 |---|---|---|
+| **Tier 0 — Behavioral** | B1 | Statistical value profile from observable outputs only (proxy, no model internals) |
 | **Tier 1 — Signature** | v1 | Ed25519 signature over deterministic canonical bytes |
 | **Tier 2 — Consistency** | v2 | Signature + parent chain hash + geometry drift bounds + coverage flags |
 | **Tier 3 — Reproduction** | v3 | Full re-extraction + re-probing + causal intervention scores + bitwise match |
+
+Tier 0 is specifically for closed-source models (GPT-4, Claude, Gemini) where internal activations are inaccessible. The proxy uses a reference model's geometry as a measurement instrument, building a behavioral value profile from the model's text outputs.
 
 ## Security
 
@@ -384,9 +402,10 @@ Those are the hard problems. This is the plumbing that proves the hard problems 
 
 ## Project Stats
 
-- **9 crates** | **20+ modules** | **8,500+ lines of Rust**
-- **255+ unit tests** | **68 integration tests** | **0 compiler warnings**
+- **10 crates** | **25+ modules** | **11,000+ lines of Rust**
+- **350+ tests** (unit + integration) | **0 compiler warnings**
 - **15 Python scripts** for model extraction and analysis
+- **13 static frontend files** (modular ES modules + CSS)
 - **12/12 security issues mitigated** (critical and high severity)
 
 ## License

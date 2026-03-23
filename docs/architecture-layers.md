@@ -94,9 +94,11 @@ All layers incorporate defence-in-depth measures hardened during the security au
 |    magic: 0x474F5431              |    append / get / chain               |
 |    N-1: payload ≤ 16 MiB guard   |    query / audit                      |
 |  MessageType                      |                                       |
-|    ExchangeReq/Rsp                |  MemoryStore (in-memory HashMap)      |
+|    ExchangeReq/Rsp (0x01/0x02)   |  MemoryStore (in-memory HashMap)      |
 |    VerifyReq/Rsp                  |  FileStore   (on-disk JSON, atomic)   |
 |    ChainReq/Rsp                   |    hash-on-load integrity check       |
+|    BehavioralExchangeReq/Rsp      |                                       |
+|      (0x10/0x11)                  |                                       |
 |    Error                          |                                       |
 |                                   |  StoreFilter (builder)                |
 |  ExchangeEnvelope (200 bytes)     |    model_id / signer / time range     |
@@ -352,10 +354,32 @@ Hardware isolation layer. Depends on got-core, got-probe, got-attest, got-wire:
 - **`HardwareCapture`** trait / **`MockDmaTap`** — GPU DMA / TEE copy-out
 - **`enclave_pipeline()`** — capture → receive → causal_check → attest_with_causal
 
-### Layer 5 — Orchestration
+### Layer 5a — Proxy Architecture (`got-proxy`)
+
+Behavioral value monitoring for closed-source models (Tier 0 trust):
+
+- **`BehavioralValueSpace`** — per-term Welford online mean/variance + EWMA for recency weighting; pairwise baselines
+- **`ProxySession`** — lifecycle: `new()` → `observe()` → `snapshot_and_attest()`
+- **`detect_deviation()`** — 3-signal algorithm:
+  - Signal 1: term-level z-score shift (fraction of terms exceeding 2.5σ)
+  - Signal 2: profile cosine drift (1 − cosine between current and baseline EWMA vectors)
+  - Signal 3: pairwise relationship disruption (fraction of pairs shifting beyond baseline σ)
+  - Combined: 0.4×term + 0.3×profile + 0.3×pairwise → WithinBaseline / Drifting / Deviated
+- **`BehavioralAttestation`** — schema "B1", Ed25519 signed, chained via parent_hash
+- **`ValueSpaceStore`** trait — `MemoryValueSpaceStore` + `FileValueSpaceStore`
+- **`ProxyConfig`** — all thresholds, weights, EWMA alpha, minimum observations (20)
+
+### Layer 5b — Orchestration
 
 **CLI Mode (`got-cli`)**: keygen, train, attest, verify, checkpoint, drift —
 all return `anyhow::Result<()>` (N-3).
+
+**Web Mode (`got-web`)**: Axum server with unified single-page D3.js frontend:
+- LLM chat relay (`/api/chat`) — Ollama (local), OpenAI, Anthropic; API key per-request, never stored
+- Text embedding (`/api/embed`) — bag-of-words lookup against reference model vocabulary
+- Proxy endpoints (`/api/proxy/session/*`) — session lifecycle, observation, deviation, attestation
+- Coherence analysis (`/api/conversation/analyse`) — per-turn value detection, contradictions, trust
+- Static file serving via `tower_http::ServeDir` — modular ES modules + CSS
 
 **Agent Runtime Mode**: calls Layer 0–4 directly, manages keypairs, exchanges
 attestations, walks chains, stores results, makes cooperate/refuse decisions.

@@ -8,7 +8,7 @@ agents mutually verify each other's geometric attestations before cooperating.
 The wire protocol (envelopes, framing, exchange, chain verification, trust
 registry) is **fully implemented** in `got-wire`.
 
-All protocol paths reflect the security-hardened codebase (255 tests passing).
+All protocol paths reflect the security-hardened codebase (353 tests passing).
 
 ---
 
@@ -496,3 +496,20 @@ The wire protocol uses length-prefixed binary framing, implemented in
   `GroupAttestation` is not yet implemented as a struct.
 - **Real hardware TEE** — `MockEnclave` provides the abstraction but actual
   SGX/SEV/H100 integration is not implemented.
+
+---
+
+## 11. Behavioral Exchange Protocol (Tier 0)
+
+For agents monitoring closed-source models, a parallel exchange protocol
+operates alongside the geometric exchange:
+
+- **Message types**: `BehavioralExchangeReq` (0x10) / `BehavioralExchangeRsp` (0x11)
+- **Agent role**: `"behavioral-observer"` — must be present in TrustRegistry roles
+- **Attestation type**: `BehavioralAttestation` (schema "B1") — structurally distinct from `GeometricAttestation`
+- **Chain verification**: `verify_behavioral_chain()` — validates parent_hash linkage
+- **Trust tier**: Tier 0 (Behavioral) — weaker than geometric attestations:
+  - Access: outputs only (no model internals)
+  - Determinism: statistical (not byte-identical)
+  - Reproducibility: same geometry + same observations → same value space hash
+- **Implementation**: `got-wire::behavioral` module + `got-proxy` crate

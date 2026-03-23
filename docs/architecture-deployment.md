@@ -5,7 +5,7 @@ agent. Shows both the current PoC (MockEnclave, everything in one
 process) and the target production deployment (real TEE, hardware
 isolation).
 
-All diagrams reflect the security-hardened codebase (255 tests passing).
+All diagrams reflect the security-hardened codebase (353 tests passing).
 
 ---
 
@@ -303,7 +303,7 @@ the agent runtime, host OS, and hypervisor cannot read.
 | 3. Probes | got-probe | Agent (PoC) / Enclave (prod) | N-2: mutex poison recovery |
 | 4. Attestation signing | got-attest | Agent (PoC) / Enclave (prod) | S-7, S-13, S-20 |
 | 5. CLI | got-cli | Agent process | N-3: anyhow::Result |
-| 6. Integration tests | tests/ | CI | 255 tests passing |
+| 6. Integration tests | tests/ | CI | 353 tests passing |
 | 7. Python bridge | extract_activations.py | Separate Python process | — |
 | 8. Drift + chaining | got-core + got-attest | Agent (PoC) / Enclave (prod) | — |
 | 9. Causal intervention (KEYSTONE) | got-probe::intervention | Agent (PoC) / Enclave (prod) | — |

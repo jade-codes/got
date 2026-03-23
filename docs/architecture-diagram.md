@@ -143,6 +143,29 @@ graph TB
     style causal fill:#0f3460,stroke:#53a8b6,color:#fff
     style enclave fill:#1a1a2e,stroke:#e94560,color:#fff
     style store fill:#16213e,stroke:#0f3460,color:#fff
+    subgraph proxy["Phase 6 — Proxy Architecture (got-proxy + got-web)"]
+        direction TB
+        USER["User (Browser)"]
+        LLM["Closed-Source LLM<br/>(Ollama / OpenAI / Anthropic)"]
+        EMBED_EP["/api/embed<br/>text → bag-of-words → embedding"]
+        CHAT_EP["/api/chat<br/>Relay to LLM provider"]
+        PROXY_OBS["/api/proxy/session/:id/observe<br/>causal cosine → z-score → detect values"]
+        VALUE_SPACE["BehavioralValueSpace<br/>Welford mean/var + EWMA<br/>per-term profiles"]
+        DEVIATION["detect_deviation()<br/>Signal 1: term z-score shift<br/>Signal 2: profile cosine drift<br/>Signal 3: pairwise disruption<br/>→ 0.4×S1 + 0.3×S2 + 0.3×S3"]
+        BEHAV_ATT["BehavioralAttestation<br/>schema: B1<br/>Ed25519 signed<br/>chained via parent_hash"]
+
+        USER --> CHAT_EP
+        CHAT_EP --> LLM
+        LLM --> CHAT_EP
+        CHAT_EP --> EMBED_EP
+        EMBED_EP --> PROXY_OBS
+        PROXY_OBS --> VALUE_SPACE
+        VALUE_SPACE --> DEVIATION
+        DEVIATION --> BEHAV_ATT
+        CAUSAL_GEOM -.-> PROXY_OBS
+    end
+
     style exchange fill:#1a1a2e,stroke:#e94560,color:#fff
     style envelope fill:#0f3460,stroke:#53a8b6,color:#fff
+    style proxy fill:#162e16,stroke:#3fb950,color:#fff
 ```

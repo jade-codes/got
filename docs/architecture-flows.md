@@ -5,7 +5,7 @@ agent-to-agent attestation exchange. Follows the plan's pipeline:
 **deterministic geometry → signed attestation → independent
 reproducibility → causal proof → agent exchange**.
 
-All flows reflect the security-hardened codebase (255 tests passing).
+All flows reflect the security-hardened codebase (353 tests passing).
 
 ---
 
@@ -399,6 +399,51 @@ Implements the Verifier role across three trust tiers:
 Content-addressed storage (`StoreId` = SHA-256 of canonical bytes).
 `FileStore` uses atomic writes (temp + rename) and hash-on-load integrity.
 `AuditReport` provides chain validity, drift summary, causal summary, signer list.
+
+### 8. Proxy Pipeline (Closed-Source Model Monitoring)
+
+For models where internals are inaccessible (GPT-4, Claude, Gemini).
+Uses a reference model's geometry as the measurement instrument.
+
+```
+  User types message in browser
+       |
+       v
+  POST /api/chat  ──────────>  LLM Provider (Ollama / OpenAI / Anthropic)
+       |                              |
+       |  <──── AI response text ─────┘
+       |
+       v
+  POST /api/embed
+       text → tokenize → lookup in reference vocabulary
+       → average matched embeddings → [f32; dim]
+       |
+       v
+  POST /api/proxy/session/:id/observe
+       |
+       ├── causal_cosine(embedding, term_emb, Φ) for each of 28 terms
+       ├── z-score → detected values (top N above threshold)
+       ├── Welford update: TermProfile.update(score, α)
+       ├── EWMA update for recency weighting
+       ├── pairwise causal cosines → PairwiseBaseline.update()
+       |
+       ├── IF observation_count ≥ 20 (baseline sufficient):
+       │     Signal 1: fraction of terms with |z-score| > 2.5σ from baseline
+       │     Signal 2: 1 − cosine(current_EWMA_profile, baseline_profile)
+       │     Signal 3: fraction of pairs shifted > 2.5σ from baseline
+       │     Combined: 0.4×S1 + 0.3×S2 + 0.3×S3
+       │     → WithinBaseline (<0.3) | Drifting (0.3–0.6) | Deviated (≥0.6)
+       │
+       └── Return { detected_values, deviation }
+
+  POST /api/proxy/session/:id/snapshot
+       |
+       ├── BehavioralValueSpace.hash() → SHA-256 of snapshot
+       ├── Build BehavioralAttestation { schema: "B1", ... }
+       ├── serialise_for_signing() → canonical bytes
+       ├── Ed25519 sign → signature
+       └── Chain: parent_hash = previous attestation hash
+```
 
 ---
 
