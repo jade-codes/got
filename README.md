@@ -287,21 +287,39 @@ Output formats: `text` (default), `json`, `svg-heatmap`, `svg-chord`.
 `got-web` provides an axum server with a unified D3.js single-page frontend. You can chat with an AI model through the proxy and watch value coherence in real time, or replay a demo conversation through the same pipeline.
 
 ```bash
+# Synthetic demo mode (no model required — compiled-in embeddings)
+cargo run --release -p got-web -- --synthetic
+
 # Real model mode (GPT-2 unembedding + vocabulary)
 cargo run --release -p got-web -- \
-    --geometry data/models/gpt2.gotact \
+    --geometry data/models/gpt2.gotue \
     --vocab data/models/gpt2-vocab.json
-
-# Synthetic demo mode (compiled-in 32-d embeddings, for development only)
-cargo run --release -p got-web -- --synthetic
 ```
 
-The unified UI supports:
-- **Live chat**: configure an LLM provider (Ollama local, OpenAI, Anthropic) in the settings bar, type messages, and the proxy monitors the AI's responses for value alignment drift
-- **Demo replay**: click "Load Demo" to replay a pre-built conversation through the proxy pipeline
-- **6 visualizations**: chord diagram, heatmap, 3D MDS sphere (with manifold density coloring), contradiction cards, redundancy cards, manifold geometry tab — all updating per turn
-- **Deviation monitoring**: 4-signal deviation strip (term z-score shift, profile cosine drift, pairwise disruption, manifold density) with manifold health badge
-- **Attested manifold analysis**: on-demand computation of manifold density, intrinsic dimension, and sectional curvature — every result is Ed25519-signed and chained
+Then open **http://127.0.0.1:3000** and click **Load Demo** to replay a sample conversation, or configure an LLM provider and chat live.
+
+![Demo overview — conversation with coherence timeline, verdict, and value chips](docs/screenshots/demo-overview.png)
+
+The UI has 7 analysis tabs, all updating per turn:
+
+| Tab | What it shows |
+|---|---|
+| **Values** | Detected value terms with activation z-scores |
+| **Deviation** | 4-signal deviation strip (term shift, profile drift, pairwise disruption, manifold density) |
+| **Contradictions** | Pairwise value contradictions with severity ratings |
+| **Chord** | D3 chord diagram of causal cosine relationships |
+| **Heatmap** | N×N pairwise causal cosine matrix |
+| **Sphere** | 3D MDS visualization with manifold density coloring |
+| **Manifold** | Terrain map of the value activation landscape |
+
+| ![Manifold terrain — activation weight surface with density coloring](docs/screenshots/tab-manifold.png) | ![3D sphere — term positions with density overlay](docs/screenshots/tab-sphere.png) |
+|---|---|
+| ![Chord diagram — pairwise causal relationships](docs/screenshots/tab-chord.png) | ![Heatmap — causal cosine matrix](docs/screenshots/tab-heatmap.png) |
+
+**Additional features:**
+- **Live chat**: configure Ollama (local), OpenAI, or Anthropic in the settings bar — the proxy monitors AI responses for value drift
+- **Manifold health badge**: score strip shows ON/OFF manifold status per observation
+- **Attested manifold**: every manifold computation is Ed25519-signed and chained — click "Attest Manifold" in the Manifold tab
 
 **Endpoints:**
 
