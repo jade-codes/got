@@ -164,6 +164,52 @@ async def hidden_states(req: HiddenStateRequest) -> HiddenStateResponse:
     )
 
 
+class ChatCompletionRequest(BaseModel):
+    model: str = ""
+    messages: List[dict]
+    max_tokens: Optional[int] = 1024
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 0.9
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(req: ChatCompletionRequest):
+    """OpenAI-compatible chat completions endpoint."""
+    if _model is None:
+        raise RuntimeError("Model not loaded")
+
+    with _model._lock:
+        text = _model.tokenizer.apply_chat_template(
+            req.messages, tokenize=False, add_generation_prompt=True,
+        )
+        inputs = _model.tokenizer(
+            text, return_tensors="pt", truncation=True, max_length=2048,
+        )
+        inputs = {k: v.to(_model.model.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            output_ids = _model.model.generate(
+                **inputs,
+                max_new_tokens=req.max_tokens or 1024,
+                do_sample=True,
+                temperature=req.temperature or 0.7,
+                top_p=req.top_p or 0.9,
+            )
+
+        new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
+        response_text = _model.tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+    # OpenAI-compatible response format
+    return {
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": response_text},
+            "finish_reason": "stop",
+        }],
+        "model": req.model or "qwen3-8b",
+    }
+
+
 @app.get("/health")
 async def health():
     return {

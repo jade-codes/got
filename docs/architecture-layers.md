@@ -285,6 +285,15 @@ Foundation types with no business logic dependencies:
   - `transform(U, h)` — Uh ∈ ℝ^V (diagnostic only)
   - `geometry_hash()` — SHA-256 of Gram matrix (deterministic fingerprint)
   - `drift_from(ref)` — ‖Φ−Φ_ref‖_F / ‖Φ_ref‖_F
+- **`ValueConstraint`/`ValueOrdering`** — value-ordering constraints for coherence scoring
+  - `coherence_score(h, ordering, geometry, α)` — C(h) ∈ [0,1] sigmoid constraint satisfaction
+  - `conversational_coherence(states, ...)` — per-position scoring with violation tracking
+- **`ValueProjection`** — eigendecomposition of G_W = WᵀΦW
+  - `value_projected_gram(probe_weights)` — projected Gram matrix + eigenvalues + dim_eff
+  - `effective_value_dimensionality(probe_weights)` — participation ratio for manifold collapse detection
+- **`AlignmentDistance`** — value geometry comparison between two models
+  - `value_alignment_distance(geo_a, geo_b, probes)` — global Frobenius + probe-projected distance
+- **`CausalGeometry::identity(d)`** — zero-allocation fast constructor for Φ = I
 - **`sha256(data)`** — canonical SHA-256 utility (used by all crates)
 - **`hex32`/`hex64`/`optional_hex32`** — serde helpers for fixed-size byte arrays as hex strings
   - Validates all bytes are ASCII hex before indexing (prevents panic on multi-byte UTF-8)
@@ -360,26 +369,39 @@ Behavioral value monitoring for closed-source models (Tier 0 trust):
 
 - **`BehavioralValueSpace`** — per-term Welford online mean/variance + EWMA for recency weighting; pairwise baselines
 - **`ProxySession`** — lifecycle: `new()` → `observe()` → `snapshot_and_attest()`
-- **`detect_deviation()`** — 3-signal algorithm:
-  - Signal 1: term-level z-score shift (fraction of terms exceeding 2.5σ)
+  - Accepts text or pre-computed embeddings; embeds internally via configurable embedding endpoint
+  - Value detection uses absolute cosine similarity (not z-scoring)
+- **`detect_deviation()`** — 4-signal algorithm:
+  - Signal 1: term-level shift (fraction of terms exceeding baseline σ)
   - Signal 2: profile cosine drift (1 − cosine between current and baseline EWMA vectors)
   - Signal 3: pairwise relationship disruption (fraction of pairs shifting beyond baseline σ)
-  - Combined: 0.4×term + 0.3×profile + 0.3×pairwise → WithinBaseline / Drifting / Deviated
+  - Signal 4: manifold density (off-manifold detection via k-NN log-density)
+  - Combined: weighted sum → WithinBaseline / Drifting / Deviated
 - **`BehavioralAttestation`** — schema "B1", Ed25519 signed, chained via parent_hash
 - **`ValueSpaceStore`** trait — `MemoryValueSpaceStore` + `FileValueSpaceStore`
-- **`ProxyConfig`** — all thresholds, weights, EWMA alpha, minimum observations (20)
+- **`ProxyConfig`** — all thresholds, weights, EWMA alpha, minimum observations
 
 ### Layer 5b — Orchestration
 
-**CLI Mode (`got-cli`)**: keygen, train, attest, verify, checkpoint, drift —
-all return `anyhow::Result<()>` (N-3).
+**CLI Mode (`got-cli`)**: keygen, train, attest, verify, checkpoint, drift,
+coherence, collapse-report, compare — all return `anyhow::Result<()>` (N-3).
 
 **Web Mode (`got-web`)**: Axum server with unified single-page D3.js frontend:
-- LLM chat relay (`/api/chat`) — Ollama (local), OpenAI, Anthropic; API key per-request, never stored
-- Text embedding (`/api/embed`) — bag-of-words lookup against reference model vocabulary
+- LLM chat — activation server (real hidden states), Ollama, OpenAI, Anthropic
+- Text embedding (`/api/embed`) — routes through activation server sidecar or falls back to bag-of-words
+- Metrics (`/api/coherence`, `/api/collapse`, `/api/compare`) — coherence scoring, manifold collapse, model comparison
 - Proxy endpoints (`/api/proxy/session/*`) — session lifecycle, observation, deviation, attestation
 - Coherence analysis (`/api/conversation/analyse`) — per-turn value detection, contradictions, trust
+- Real Φ = UᵀU geometry from model's unembedding matrix (248K × 4096 for Qwen3.5)
+- Configurable value taxonomy (`--values values.toml`) — descriptions embedded through reference model
+- 11 visualization tabs in 3 groups (Live / Pairwise / Geometry)
 - Static file serving via `tower_http::ServeDir` — modular ES modules + CSS
+
+**Activation Server** (`scripts/activation_server.py`): Python FastAPI sidecar
+that loads a model via HuggingFace (4-bit quantized), serves intermediate-layer
+residual stream activations via `/hidden_states` and OpenAI-compatible chat via
+`/v1/chat/completions`. Enables measuring under the causal inner product at
+layers where value concepts actually separate (middle layers, not output layer).
 
 **Agent Runtime Mode**: calls Layer 0–4 directly, manages keypairs, exchanges
 attestations, walks chains, stores results, makes cooperate/refuse decisions.

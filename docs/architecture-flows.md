@@ -467,6 +467,82 @@ In reference model mode, descriptions are embedded by averaging token vectors
 from the unembedding matrix. In proxy mode with an external embedding model,
 term names are embedded through the same API used for observations.
 
+### 9. Activation Server Pipeline (Real Residual Stream Activations)
+
+For live chat with real intermediate-layer hidden states instead of
+bag-of-words token averaging. The activation server is a Python FastAPI
+sidecar that loads the model via HuggingFace transformers and registers
+hooks to capture residual stream activations at a configured layer.
+
+**Why intermediate layers?** The unembedding matrix Φ = UᵀU collapses
+value dimensions at the output layer (dim_eff = 1.1/13 for Qwen3.5 —
+all value terms map to the same "fluent English" direction). Middle
+layers (40-55% depth) separate semantic concepts much better.
+
+```
+  Python sidecar (scripts/activation_server.py)
+       |
+       ├── Loads model via HuggingFace (4-bit quantized, ~5GB VRAM)
+       ├── Registers forward hook on target layer (e.g. layer 16/36)
+       ├── POST /hidden_states  { text: "..." }
+       │     → tokenize → forward pass → hook captures layer 16 output
+       │     → mean-pool across positions → (4096,) residual stream vector
+       │     → Return { hidden_state: [f32 x 4096], layer, n_tokens }
+       │
+       └── POST /v1/chat/completions  (OpenAI-compatible)
+             → full generation → response text
+
+  got-web (Rust, --activation-server http://localhost:8100)
+       |
+       ├── POST /api/embed  { text: "..." }
+       │     → calls activation server /hidden_states
+       │     → returns real residual stream activation (4096d)
+       │     → fallback: bag-of-words from .gotue vocabulary
+       │
+       ├── Value detection uses the hidden state:
+       │     cos_Φ(hidden_state, term_embedding) for each value term
+       │     where Φ = UᵀU from the model's unembedding matrix
+       │
+       └── The same Φ weights the inner product — now measuring
+           how much the model's intermediate representation projects
+           onto value directions through the output distribution
+```
+
+**Key insight**: The embedding quality is the bottleneck, not the geometry.
+Bag-of-words averaging of unembedding rows gives all values similar scores
+(0.44-0.71 compressed range). Real hidden states from intermediate layers
+carry compositional semantics that should separate values meaningfully.
+
+### 10. Manifold Collapse and Model Comparison
+
+New metrics for characterising value geometry:
+
+```
+  POST /api/collapse
+       |
+       ├── Collect probe directions W from term embeddings
+       ├── Compute G_W = WᵀΦW (k×k projected Gram matrix)
+       ├── Eigendecompose G_W → λ₁ ≥ λ₂ ≥ ... ≥ λₖ
+       ├── Participation ratio: dim_eff = (Σλᵢ)² / Σλᵢ²
+       └── Return { k, eigenvalues, dim_eff, assessment }
+
+  POST /api/compare
+       |
+       ├── Load second .gotue → build Φ_B = U_B^T U_B
+       ├── Global: d(A,B) = ‖Φ_A - Φ_B‖_F / max(‖Φ_A‖_F, ‖Φ_B‖_F)
+       ├── Per-probe: d_w = |wᵀ(Φ_A - Φ_B)w| / max(|wᵀΦ_Aw|, |wᵀΦ_Bw|)
+       ├── Probe-projected: d_V = mean(d_w)
+       └── Return { global_distance, probe_projected_distance, per_probe, ratio }
+
+  POST /api/coherence
+       |
+       ├── Resolve term names → embedding vectors
+       ├── For each message embedding h:
+       │     C(h) = (1/n) Σ σ(α · (⟨u_dom, h⟩_c - ⟨u_sub, h⟩_c))
+       ├── Track violations: positions where C(h) < 0.5
+       └── Return { per_message, mean, min, max, violated }
+```
+
 ---
 
 ## File Formats

@@ -53,7 +53,7 @@ got-web                        Layer 5b — Unified web UI with LLM chat + value
 
 | Crate | Purpose |
 |---|---|
-| `got-core` | `CausalGeometry`, `GeometricAttestation`, `LayerActivation`, precision types, drift computation, `ValueManifold` (k-NN density, intrinsic dimension, sectional curvature under causal metric) |
+| `got-core` | `CausalGeometry`, `GeometricAttestation`, `LayerActivation`, precision types, drift computation, `ValueManifold` (k-NN density, intrinsic dimension, sectional curvature under causal metric), value-ordering coherence C(h), manifold collapse quantifier (dim_eff), value alignment distance d_V(A,B) |
 | `got-probe` | Linear probe training (SGD under causal IP), Platt calibration, ECE metric, inference, causal intervention checks, measurement hooks and sidecar, `InterventionExperiment` (interpolation with incoherence scoring and manifold membership) |
 | `got-attest` | Attestation assembly, Ed25519 signing/verification, Merkle roots, causal consistency validation |
 | `got-wire` | Framed wire protocol, exchange envelopes, chain verification, trust registry, PKI certificates, CRL, behavioral exchange protocol |
@@ -61,8 +61,8 @@ got-web                        Layer 5b — Unified web UI with LLM chat + value
 | `got-enclave` | TEE abstraction — signing keys never leave the enclave boundary (software mock for PoC) |
 | `got-incoherence` | Zero-training coherence analysis: pairwise causal cosines, contradiction/redundancy detection, SVG heatmap and chord diagram generation |
 | `got-proxy` | **Proxy architecture for closed-source models**: behavioral value space (Welford + EWMA), absolute cosine value detection, 4-signal deviation detection (term shift, profile drift, pairwise disruption, manifold density), Ed25519 behavioral attestations with manifold density/curvature readings, memory/file storage |
-| `got-cli` | CLI with `keygen`, `train`, `attest`, `verify`, `checkpoint`, `drift`, `calibration-report`, `issue-cert`, `revoke-cert`, `rotate-key`, `coherence-check` subcommands |
-| `got-web` | Axum web server with unified D3.js frontend: LLM chat relay (Ollama/OpenAI/Anthropic), live value monitoring via proxy with configurable embedding backend, configurable value taxonomy (`--values`), conversation coherence analysis with 6 visualizations (chord, heatmap, 3D sphere with density coloring, contradictions, redundancies, manifold geometry) |
+| `got-cli` | CLI with `keygen`, `train`, `attest`, `verify`, `checkpoint`, `drift`, `calibration-report`, `issue-cert`, `revoke-cert`, `rotate-key`, `coherence-check`, `coherence`, `collapse-report`, `compare` subcommands |
+| `got-web` | Axum web server with unified D3.js frontend: LLM chat with activation server sidecar for real residual stream embeddings, live value monitoring via proxy, real Φ = UᵀU geometry, configurable value taxonomy (`--values`), 11 visualization tabs in 3 groups (Live: values/deviation/coherence, Pairwise: contradictions/redundancies/chord/heatmap, Geometry: sphere/manifold/collapse/compare) |
 
 ## Getting Started
 
@@ -291,42 +291,69 @@ Output formats: `text` (default), `json`, `svg-heatmap`, `svg-chord`.
 # Synthetic demo mode (no model required — compiled-in embeddings)
 cargo run --release -p got-web -- --synthetic
 
-# Real model mode (GPT-2 unembedding + vocabulary)
+# Real model mode with causal geometry (requires .gotue + vocabulary)
 cargo run --release -p got-web -- \
-    --geometry data/models/gpt2.gotue \
-    --vocab data/models/gpt2-vocab.json
-
-# With configurable value taxonomy (descriptions embedded through reference model)
-cargo run --release -p got-web -- \
-    --geometry data/models/gpt2.gotue \
-    --vocab data/models/gpt2-vocab.json \
+    --geometry data/models/qwen35-9b.gotue \
+    --vocab data/models/qwen35-9b-vocab.json \
     --values values.toml
+
+# Full pipeline with activation server (real residual stream activations)
+# Terminal 1: start the activation server sidecar
+python scripts/activation_server.py \
+    --model Qwen/Qwen3-8B --layer 16 --quantize 4bit
+
+# Terminal 2: start got-web with activation server
+cargo run --release -p got-web -- \
+    --geometry data/models/qwen35-9b.gotue \
+    --vocab data/models/qwen35-9b-vocab.json \
+    --values values.toml \
+    --activation-server http://localhost:8100
 ```
+
+The activation server serves intermediate-layer hidden states from the actual model. When configured, `/api/embed` returns real residual stream activations measured under Φ = UᵀU instead of bag-of-words token averaging. The activation server also provides an OpenAI-compatible `/v1/chat/completions` endpoint — set the UI's base URL to `http://localhost:8100/v1`.
 
 Then open **http://127.0.0.1:3000** and click **Load Demo** to replay a sample conversation, or configure an LLM provider and chat live.
 
 ![Demo overview — conversation with coherence timeline, verdict, and value chips](docs/screenshots/demo-overview.png)
 
-The UI has 7 analysis tabs, all updating per turn:
+The UI has 11 analysis tabs in 3 groups:
+
+**Live Monitoring** (updates as messages come in):
 
 | Tab | What it shows |
 |---|---|
-| **Values** | Detected value terms with cosine similarity scores |
+| **Values** | Detected value terms with absolute cosine scores under Φ = UᵀU |
 | **Deviation** | 4-signal deviation strip (term shift, profile drift, pairwise disruption, manifold density) |
+| **Coherence** | Per-message C(h) line chart with value-ordering constraint violations |
+
+**Pairwise Analysis** (computed per conversation):
+
+| Tab | What it shows |
+|---|---|
 | **Contradictions** | Pairwise value contradictions with severity ratings |
+| **Redundancies** | Near-synonym value pairs |
 | **Chord** | D3 chord diagram of causal cosine relationships |
 | **Heatmap** | N×N pairwise causal cosine matrix |
+
+**Geometry** (on-demand computation):
+
+| Tab | What it shows |
+|---|---|
 | **Sphere** | 3D MDS visualization with manifold density coloring |
 | **Manifold** | Terrain map of the value activation landscape |
+| **Collapse** | Eigenvalue decomposition of G_W = WᵀΦW with dim_eff participation ratio |
+| **Compare** | Value alignment distance d_V(A,B) between two models |
 
 | ![Manifold terrain — activation weight surface with density coloring](docs/screenshots/tab-manifold.png) | ![3D sphere — term positions with density overlay](docs/screenshots/tab-sphere.png) |
 |---|---|
 | ![Chord diagram — pairwise causal relationships](docs/screenshots/tab-chord.png) | ![Heatmap — causal cosine matrix](docs/screenshots/tab-heatmap.png) |
 
 **Additional features:**
-- **Live chat**: configure Ollama (local), OpenAI, or Anthropic in the settings bar — the proxy monitors AI responses for value drift
+- **Live chat**: configure the activation server, Ollama, OpenAI, or Anthropic — the proxy monitors AI responses for value drift
+- **Activation server**: serves real intermediate-layer hidden states from a local model (Qwen3-8B in 4-bit, ~5GB VRAM) — also provides OpenAI-compatible chat
 - **Manifold health badge**: score strip shows ON/OFF manifold status per observation
-- **Attested manifold**: every manifold computation is Ed25519-signed and chained — click "Attest Manifold" in the Manifold tab
+- **Attested manifold**: every manifold computation is Ed25519-signed and chained
+- **Manifold collapse detection**: dim_eff shows how many independent value dimensions exist under the causal geometry (UᵀU collapses for most models — dim_eff = 1.1/13 for Qwen3.5, indicating one effective dimension at the unembedding layer)
 
 **Endpoints:**
 
@@ -335,10 +362,13 @@ The UI has 7 analysis tabs, all updating per turn:
 | `GET` | `/` | Unified single-page application (static files) |
 | `GET` | `/api/demo-conversation` | Returns a pre-built conversation with per-message embeddings |
 | `POST` | `/api/conversation/analyse` | Per-turn value detection, coherence scores, contradiction tracking, speaker influence assessment |
-| `POST` | `/api/embed` | Text-to-embedding via reference model vocabulary (bag-of-words) |
-| `POST` | `/api/chat` | Relay to LLM provider (Ollama/OpenAI/Anthropic) — API key per-request, never stored |
+| `POST` | `/api/embed` | Text-to-embedding: routes through activation server (real hidden states) or falls back to bag-of-words |
+| `POST` | `/api/chat` | Relay to LLM provider (activation server/Ollama/OpenAI/Anthropic) — API key per-request, never stored |
+| `POST` | `/api/coherence` | Value-ordering coherence C(h) per message with constraint violation detection |
+| `POST` | `/api/collapse` | Manifold collapse report: eigenvalues of G_W = WᵀΦW, dim_eff, assessment |
+| `POST` | `/api/compare` | Value alignment distance between loaded model and a second .gotue file |
 | `POST` | `/api/proxy/session` | Create a proxy monitoring session (optionally with `embedding_url` + `embedding_model` for external embedding) |
-| `POST` | `/api/proxy/session/:id/observe` | Submit text observation — proxy embeds internally, returns detected values + deviation report |
+| `POST` | `/api/proxy/session/:id/observe` | Submit text or embedding observation — returns detected values + deviation report |
 | `GET` | `/api/proxy/session/:id/status` | Value space summary + latest deviation |
 | `GET` | `/api/proxy/session/:id/history` | Deviation history |
 | `POST` | `/api/proxy/session/:id/manifold` | Compute manifold geometry + signed behavioral attestation (density, curvature, per-term densities) |
@@ -382,10 +412,17 @@ The `scripts/` directory contains tools for model activation extraction and anal
 
 | Script | Purpose |
 |---|---|
+| `activation_server.py` | **Sidecar service**: loads a model via HuggingFace, serves intermediate-layer hidden states + OpenAI-compatible chat |
 | `extract_activations.py` | Extract residual-stream activations and unembedding matrix from any HuggingFace model |
-| `inject_and_generate.py` | Inject an activation vector at a transformer layer and generate text (extraction-and-injection counterpart) |
+| `extract_gguf_unembedding.py` | Extract unembedding matrix from GGUF files (Ollama models) → .gotue format |
+| `train_sae.py` | Train a top-k sparse autoencoder on transformer activations |
+| `extract_sae_features.py` | Select value-relevant SAE features and export as ProbeSet JSON |
+| `rlhf_comparison.py` | RLHF manifold collapse experiment: compare base vs instruct model dim_eff |
+| `rlhf_comparison_report.py` | Generate formatted report from RLHF experiment results |
+| `tied_embeddings_experiment.py` | Test whether tied embeddings contaminate causal consistency |
+| `inject_and_generate.py` | Inject an activation vector at a transformer layer and generate text |
 | `extract_gpt2_demo.py` | Extract GPT-2 specific data for the demo pipeline |
-| `build_gpt2_demo.py` | Build the complete GPT-2 demo dataset (activations, embeddings, vocabulary) |
+| `build_gpt2_demo.py` | Build the complete GPT-2 demo dataset |
 | `save_vocab.py` | Save a model's vocabulary as JSON |
 | `analyse_gpt2_geometry.py` | Analyse the geometric properties of GPT-2's causal inner product |
 | `analyse_centering.py` | Analyse embedding centering effects |
@@ -412,6 +449,7 @@ This project proves the **technical substrate** — that the causal inner produc
 - **Institutional governance** — who has standing to adjudicate trust
 - **Platt calibration ground truth** — the calibration pipeline is functional but needs real-world labelled datasets for meaningful ECE scores
 - **Threshold calibration** — coherence detection thresholds need tuning on real conversational data
+- **UᵀU collapse** — the causal inner product at the unembedding layer collapses value dimensions (dim_eff = 1.1/13 for Qwen3.5); intermediate-layer activations via the activation server address this, but the optimal layer selection is model-dependent
 
 Those are the hard problems. This is the plumbing that proves the hard problems are worth solving.
 
@@ -433,11 +471,12 @@ Those are the hard problems. This is the plumbing that proves the hard problems 
 
 ## Project Stats
 
-- **10 crates** | **30+ modules** | **21,000+ lines of Rust**
-- **390 tests** (unit + integration) | **0 new compiler warnings**
-- **16 Python scripts** for model extraction, injection, and analysis
-- **13 static frontend files** (modular ES modules + CSS)
+- **10 crates** | **30+ modules** | **25,000+ lines of Rust**
+- **390+ tests** (unit + integration) | **0 new compiler warnings**
+- **23 Python scripts** for model extraction, SAE training, experiments, and activation serving
+- **14 static frontend files** (modular ES modules + CSS)
 - **12/12 security issues mitigated** (critical and high severity)
+- **Real model validated**: Qwen3.5:9b with Φ = UᵀU geometry (248K vocab x 4096d)
 
 ## License
 
