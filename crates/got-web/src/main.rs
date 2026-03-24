@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 mod api;
+mod demo;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,11 +44,11 @@ use tower_http::services::ServeDir;
 struct Args {
     /// Path to .gotue unembedding matrix file.
     #[arg(long)]
-    geometry: String,
+    geometry: Option<String>,
 
-    /// Path to vocabulary JSON array.
+    /// Path to vocabulary JSON array (required with --geometry).
     #[arg(long)]
-    vocab: String,
+    vocab: Option<String>,
 
     /// Path to value taxonomy TOML file.
     /// When provided, value terms and descriptions are loaded from this file
@@ -65,6 +66,11 @@ struct Args {
     /// Listen address (default: 127.0.0.1:3000).
     #[arg(long, default_value = "127.0.0.1:3000")]
     listen: String,
+
+    /// Run in synthetic demo mode (compiled-in 32-d embeddings).
+    /// For deployment/development without a reference model.
+    #[arg(long)]
+    synthetic: bool,
 
     /// Path to static files directory (default: auto-detected relative to binary).
     #[arg(long)]
@@ -149,8 +155,48 @@ async fn demo_conversation(
 }
 
 // ---------------------------------------------------------------------------
-// State builder
+// State builders
 // ---------------------------------------------------------------------------
+
+/// Build state from compiled-in synthetic demo data (for deployment without a reference model).
+fn build_synthetic_state() -> AppState {
+    let term_embeddings: HashMap<String, Vec<f32>> =
+        serde_json::from_str(demo::demo_embeddings_json())
+            .expect("failed to parse demo embeddings");
+
+    let dim = term_embeddings.values().next().unwrap().len();
+
+    // Build Φ = I for the synthetic space
+    let mut identity = vec![0.0f32; dim * dim];
+    for i in 0..dim {
+        identity[i * dim + i] = 1.0;
+    }
+    let geometry = CausalGeometry::from_raw_gram(identity, dim)
+        .expect("identity matrix should be PD");
+
+    let source = PrecomputedEmbeddings::from_json(demo::demo_embeddings_json())
+        .expect("failed to load demo embeddings");
+
+    let mut available_terms: Vec<String> = term_embeddings.keys().cloned().collect();
+    available_terms.sort();
+
+    AppState {
+        geometry,
+        term_embeddings,
+        embedding_source: Box::new(source),
+        available_terms,
+        hidden_dim: dim,
+        mode: "synthetic-demo".into(),
+        demo_conversation_json: demo::demo_conversation_json().to_string(),
+        default_config: CoherenceConfig {
+            antonym_threshold: -0.5,
+            synonym_threshold: 0.8,
+            severity_scale: None,
+        },
+        introduction_threshold: 0.0,
+        proxy: ProxyState::new(),
+    }
+}
 
 /// Load a .gotue binary file into an UnembeddingMatrix.
 fn load_gotue(path: &str) -> UnembeddingMatrix {
@@ -193,8 +239,13 @@ fn load_gotue(path: &str) -> UnembeddingMatrix {
 
 /// Build application state from the reference model and value terms.
 fn build_state(args: &Args) -> AppState {
-    eprintln!("Loading unembedding matrix from {}...", args.geometry);
-    let matrix = load_gotue(&args.geometry);
+    let gotue_path = args.geometry.as_deref()
+        .expect("--geometry is required when not using --synthetic");
+    let vocab_path = args.vocab.as_deref()
+        .expect("--vocab is required when not using --synthetic");
+
+    eprintln!("Loading unembedding matrix from {gotue_path}...");
+    let matrix = load_gotue(gotue_path);
     eprintln!(
         "  {} vocab × {} hidden dim",
         matrix.vocab_size, matrix.hidden_dim
@@ -202,9 +253,9 @@ fn build_state(args: &Args) -> AppState {
 
     let hidden_dim = matrix.hidden_dim;
 
-    eprintln!("Loading vocabulary from {}...", args.vocab);
-    let vocab_json = std::fs::read_to_string(&args.vocab)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", args.vocab));
+    eprintln!("Loading vocabulary from {vocab_path}...");
+    let vocab_json = std::fs::read_to_string(vocab_path)
+        .unwrap_or_else(|e| panic!("failed to read {vocab_path}: {e}"));
     let vocab_raw: Vec<String> = serde_json::from_str(&vocab_json)
         .unwrap_or_else(|e| panic!("failed to parse vocab JSON: {e}"));
 
@@ -362,7 +413,15 @@ fn build_state(args: &Args) -> AppState {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let state = build_state(&args);
+
+    let state = if args.synthetic {
+        build_synthetic_state()
+    } else if args.geometry.is_some() {
+        build_state(&args)
+    } else {
+        eprintln!("error: specify --geometry <path.gotue> --vocab <vocab.json>, or --synthetic");
+        std::process::exit(1);
+    };
 
     eprintln!("Mode: {} | hidden_dim: {} | terms: {}",
         state.mode, state.hidden_dim, state.available_terms.len());
