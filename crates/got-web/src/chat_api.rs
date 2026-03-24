@@ -88,6 +88,7 @@ async fn call_openai(req: &ChatRequest) -> Result<String, String> {
         .post(format!("{base_url}/chat/completions"))
         .header("Authorization", format!("Bearer {}", req.api_key))
         .header("Content-Type", "application/json")
+        .header("User-Agent", "got-web/1.0")
         .json(&body)
         .send()
         .await
@@ -144,6 +145,7 @@ async fn call_anthropic(req: &ChatRequest) -> Result<String, String> {
         .header("x-api-key", &req.api_key)
         .header("anthropic-version", "2023-06-01")
         .header("Content-Type", "application/json")
+        .header("User-Agent", "got-web/1.0")
         .json(&body)
         .send()
         .await

@@ -1,0 +1,22 @@
+{
+  "hosting": {
+    "public": "crates/got-web/static",
+    "ignore": ["firebase.json", "**/node_modules/**"],
+    "rewrites": [
+      {
+        "source": "/api/**",
+        "run": {
+          "serviceId": "got-web",
+          "region": "europe-west1"
+        }
+      },
+      {
+        "source": "**",
+        "run": {
+          "serviceId": "got-web",
+          "region": "europe-west1"
+        }
+      }
+    ]
+  }
+}
