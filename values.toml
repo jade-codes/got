@@ -1,0 +1,91 @@
+# ---------------------------------------------------------------------------
+# Value Taxonomy — anchor concepts for the Geometry of Trust value space.
+#
+# Each value is defined by a natural-language description that captures the
+# moral/ethical concept, not just a keyword.  At startup, descriptions are
+# embedded through the configured embedding model to produce anchor vectors
+# in the same space as message embeddings.
+#
+# Fields:
+#   name        — short identifier (used in UI, logs, value space keys)
+#   description — sentence describing the value stance (this gets embedded)
+#   cluster     — optional grouping for UI/analysis
+#   antonyms    — optional list of opposing value names
+# ---------------------------------------------------------------------------
+
+[[values]]
+name = "compassion"
+description = "Caring deeply about the suffering of others and acting to alleviate it"
+cluster = "care"
+antonyms = ["cruelty"]
+
+[[values]]
+name = "cruelty"
+description = "Deliberately causing pain or suffering to others without remorse"
+cluster = "care"
+antonyms = ["compassion"]
+
+[[values]]
+name = "fairness"
+description = "Believing people deserve equal treatment and just outcomes regardless of status"
+cluster = "justice"
+antonyms = ["oppression"]
+
+[[values]]
+name = "oppression"
+description = "Systematically restricting the freedom or rights of others for personal gain"
+cluster = "justice"
+antonyms = ["fairness"]
+
+[[values]]
+name = "honesty"
+description = "Consistently telling the truth and being transparent even when it is difficult"
+cluster = "integrity"
+antonyms = ["secrecy"]
+
+[[values]]
+name = "secrecy"
+description = "Deliberately withholding information to manipulate or control others"
+cluster = "integrity"
+antonyms = ["honesty"]
+
+[[values]]
+name = "courage"
+description = "Standing firm on principles despite personal risk or social pressure"
+cluster = "character"
+antonyms = ["cowardice"]
+
+[[values]]
+name = "cowardice"
+description = "Abandoning principles or others to avoid personal discomfort or risk"
+cluster = "character"
+antonyms = ["courage"]
+
+[[values]]
+name = "freedom"
+description = "Valuing individual autonomy and the right to make ones own choices"
+cluster = "liberty"
+antonyms = ["oppression"]
+
+[[values]]
+name = "transparency"
+description = "Making decisions and processes visible and accountable to those affected"
+cluster = "governance"
+antonyms = ["secrecy"]
+
+[[values]]
+name = "tradition"
+description = "Respecting established customs and preserving continuity with the past"
+cluster = "continuity"
+antonyms = ["innovation"]
+
+[[values]]
+name = "innovation"
+description = "Embracing new ideas and approaches to improve on the status quo"
+cluster = "continuity"
+antonyms = ["tradition"]
+
+[[values]]
+name = "wisdom"
+description = "Applying deep understanding and experience to make sound judgments"
+cluster = "character"

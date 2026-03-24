@@ -152,57 +152,6 @@ fn contradiction_key(c: &Contradiction) -> (String, String) {
     (a, b)
 }
 
-/// Build Φ = EᵀE from a set of embeddings, with ε-regularisation.
-///
-/// E is the n×d matrix of embeddings. Φ = EᵀE is d×d.
-/// When n < d (fewer embeddings than dimensions), Φ is rank-deficient,
-/// so we add εI to ensure positive-definiteness.
-pub fn build_geometry_from_embeddings(
-    embeddings_map: &HashMap<String, Vec<f32>>,
-    dim: usize,
-) -> Result<CausalGeometry, String> {
-    let n = embeddings_map.len();
-    if n == 0 {
-        return Err("no embeddings".into());
-    }
-
-    // Stack embeddings into matrix E (n × dim), row-major
-    let mut e_data = Vec::with_capacity(n * dim);
-    for emb in embeddings_map.values() {
-        if emb.len() != dim {
-            return Err(format!("embedding dim mismatch: expected {dim}, got {}", emb.len()));
-        }
-        e_data.extend_from_slice(emb);
-    }
-
-    // Compute Φ = EᵀE (dim × dim)
-    let mut gram = vec![0.0f32; dim * dim];
-    for i in 0..dim {
-        for j in i..dim {
-            let mut dot = 0.0f32;
-            for k in 0..n {
-                dot += e_data[k * dim + i] * e_data[k * dim + j];
-            }
-            gram[i * dim + j] = dot;
-            gram[j * dim + i] = dot; // symmetric
-        }
-    }
-
-    // Try without regularisation first
-    match CausalGeometry::from_raw_gram(gram.clone(), dim) {
-        Ok(g) => Ok(g),
-        Err(_) => {
-            // Rank-deficient (n < dim) — add εI regularisation
-            let epsilon = 1e-6_f32;
-            for i in 0..dim {
-                gram[i * dim + i] += epsilon;
-            }
-            CausalGeometry::from_raw_gram(gram, dim)
-                .map_err(|e| format!("geometry error after regularisation: {e}"))
-        }
-    }
-}
-
 /// Detect which value terms are active in a message embedding.
 ///
 /// Computes z-scored logits: for each term, the raw dot product h·u_i

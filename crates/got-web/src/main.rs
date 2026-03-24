@@ -6,16 +6,13 @@
 //   2. Analyses conversation coherence at POST /api/conversation/analyse
 //   3. Returns a demo conversation at GET /api/demo-conversation
 //
-// Two modes:
-//   - Real model (--geometry path.gotue --vocab vocab.json):
-//       loads GPT-2 (or any transformer) unembedding matrix,
-//       builds Φ = I and uses vocabulary rows as value-term embeddings.
-//   - Synthetic demo (--synthetic): compiled-in 32-d hand-crafted embeddings.
-//       For development and testing only. Not credible for analysis.
+// Loads a reference model's unembedding matrix (.gotue) and vocabulary,
+// then resolves value terms to embeddings in the model's hidden space.
+// Value terms come from a taxonomy TOML file (--values) or fall back to
+// a built-in default list.
 // ---------------------------------------------------------------------------
 
 mod api;
-mod demo;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,16 +41,24 @@ use tower_http::services::ServeDir;
 #[derive(Parser, Debug)]
 #[command(name = "got-web", about = "Conversational incoherence visualiser")]
 struct Args {
-    /// Path to .gotue unembedding matrix file (enables real model mode).
+    /// Path to .gotue unembedding matrix file.
     #[arg(long)]
-    geometry: Option<String>,
+    geometry: String,
 
-    /// Path to vocabulary JSON array (required with --geometry).
+    /// Path to vocabulary JSON array.
     #[arg(long)]
-    vocab: Option<String>,
+    vocab: String,
+
+    /// Path to value taxonomy TOML file.
+    /// When provided, value terms and descriptions are loaded from this file
+    /// and descriptions are embedded by averaging token vectors from the
+    /// reference model's unembedding matrix.
+    /// When omitted, falls back to built-in single-token value terms.
+    #[arg(long)]
+    values: Option<String>,
 
     /// Path to demo conversation JSON with matching embedding dimensions.
-    /// In real mode, defaults to data/models/gpt2-demo-conversation.json.
+    /// Defaults to data/models/gpt2-demo-conversation.json.
     #[arg(long)]
     demo_conversation: Option<String>,
 
@@ -61,20 +66,72 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:3000")]
     listen: String,
 
-    /// Run in synthetic demo mode (hand-crafted 32-d embeddings).
-    /// For development/testing only — not credible for real analysis.
-    #[arg(long)]
-    synthetic: bool,
-
     /// Path to static files directory (default: auto-detected relative to binary).
     #[arg(long)]
     static_dir: Option<String>,
 }
 
-// Default value terms to look up in any model's vocabulary.
-// 13 terms across 5 opposition axes + 2 standalone, chosen for
-// independence (no redundant pairs like equality/equity or honesty/integrity).
-const VALUE_TERMS: &[&str] = &[
+// ---------------------------------------------------------------------------
+// Value taxonomy
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+struct ValueTaxonomy {
+    values: Vec<ValueEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ValueEntry {
+    name: String,
+    description: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    cluster: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    antonyms: Vec<String>,
+}
+
+/// Embed a description by averaging token embeddings from the reference model.
+///
+/// Tokenizes by whitespace, looks up each token in the unembedding matrix,
+/// and averages the found vectors.  This produces a multi-token concept
+/// vector in the reference model's own hidden space.
+fn embed_description(description: &str, lookup: &UnembeddingLookup) -> Option<Vec<f32>> {
+    let dim = lookup.hidden_dim();
+    let mut sum = vec![0.0f32; dim];
+    let mut matched = 0usize;
+
+    for token in description.split_whitespace() {
+        let clean: String = token
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
+            .collect();
+        if clean.is_empty() {
+            continue;
+        }
+        if let Some(emb) = lookup.embed(&clean) {
+            for (s, e) in sum.iter_mut().zip(emb.iter()) {
+                *s += e;
+            }
+            matched += 1;
+        }
+    }
+
+    if matched == 0 {
+        return None;
+    }
+
+    let scale = 1.0 / matched as f32;
+    for s in sum.iter_mut() {
+        *s *= scale;
+    }
+    Some(sum)
+}
+
+// Fallback value terms when no taxonomy file is provided.
+const DEFAULT_VALUE_TERMS: &[&str] = &[
     "compassion", "courage", "cowardice", "cruelty",
     "fairness", "freedom", "honesty", "innovation",
     "oppression", "secrecy", "tradition", "transparency", "wisdom",
@@ -92,44 +149,8 @@ async fn demo_conversation(
 }
 
 // ---------------------------------------------------------------------------
-// State builders
+// State builder
 // ---------------------------------------------------------------------------
-
-/// Build state from compiled-in synthetic demo data.
-fn build_synthetic_state() -> AppState {
-    let term_embeddings: HashMap<String, Vec<f32>> =
-        serde_json::from_str(demo::demo_embeddings_json())
-            .expect("failed to parse demo embeddings");
-
-    let dim = term_embeddings.values().next().unwrap().len();
-
-    let geometry =
-        api::build_geometry_from_embeddings(&term_embeddings, dim)
-            .expect("failed to build demo geometry");
-
-    let source = PrecomputedEmbeddings::from_json(demo::demo_embeddings_json())
-        .expect("failed to load demo embeddings");
-
-    let mut available_terms: Vec<String> = term_embeddings.keys().cloned().collect();
-    available_terms.sort();
-
-    AppState {
-        geometry,
-        term_embeddings,
-        embedding_source: Box::new(source),
-        available_terms,
-        hidden_dim: dim,
-        mode: "synthetic-demo".into(),
-        demo_conversation_json: demo::demo_conversation_json().to_string(),
-        default_config: CoherenceConfig {
-            antonym_threshold: -0.5,
-            synonym_threshold: 0.8,
-            severity_scale: None,
-        },
-        introduction_threshold: 0.0,
-        proxy: ProxyState::new(),
-    }
-}
 
 /// Load a .gotue binary file into an UnembeddingMatrix.
 fn load_gotue(path: &str) -> UnembeddingMatrix {
@@ -161,7 +182,6 @@ fn load_gotue(path: &str) -> UnembeddingMatrix {
     }
 
     let mut values = Vec::with_capacity(total);
-    // Bulk-read f32 LE values (much faster than individual byte conversions)
     let float_slice = &data[offset..offset + total_bytes];
     for chunk in float_slice.chunks_exact(4) {
         values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
@@ -171,14 +191,10 @@ fn load_gotue(path: &str) -> UnembeddingMatrix {
         .expect("unembedding data length mismatch")
 }
 
-/// Build state from a real model's .gotue and vocabulary.
-fn build_real_state(
-    gotue_path: &str,
-    vocab_path: &str,
-    demo_conv_path: Option<&str>,
-) -> AppState {
-    eprintln!("Loading unembedding matrix from {gotue_path}...");
-    let matrix = load_gotue(gotue_path);
+/// Build application state from the reference model and value terms.
+fn build_state(args: &Args) -> AppState {
+    eprintln!("Loading unembedding matrix from {}...", args.geometry);
+    let matrix = load_gotue(&args.geometry);
     eprintln!(
         "  {} vocab × {} hidden dim",
         matrix.vocab_size, matrix.hidden_dim
@@ -186,9 +202,9 @@ fn build_real_state(
 
     let hidden_dim = matrix.hidden_dim;
 
-    eprintln!("Loading vocabulary from {vocab_path}...");
-    let vocab_json = std::fs::read_to_string(vocab_path)
-        .unwrap_or_else(|e| panic!("failed to read {vocab_path}: {e}"));
+    eprintln!("Loading vocabulary from {}...", args.vocab);
+    let vocab_json = std::fs::read_to_string(&args.vocab)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", args.vocab));
     let vocab_raw: Vec<String> = serde_json::from_str(&vocab_json)
         .unwrap_or_else(|e| panic!("failed to parse vocab JSON: {e}"));
 
@@ -202,19 +218,61 @@ fn build_real_state(
     let lookup = UnembeddingLookup::new(vocab_clean, matrix)
         .expect("vocab/matrix mismatch");
 
-    // Resolve the value terms to get their raw embeddings (for detection)
+    // Resolve value terms to embeddings in the reference model's hidden space.
     let mut term_embeddings = HashMap::new();
     let mut available_terms = Vec::new();
-    for &term in VALUE_TERMS {
-        if let Some(emb) = lookup.embed(term) {
-            term_embeddings.insert(term.to_string(), emb);
-            available_terms.push(term.to_string());
-        } else {
-            eprintln!("  warning: term '{term}' not in vocabulary (skipped)");
+
+    if let Some(ref values_path) = args.values {
+        // Taxonomy mode: embed descriptions by averaging token vectors.
+        eprintln!("Loading value taxonomy from {values_path}...");
+        let toml_str = std::fs::read_to_string(values_path)
+            .unwrap_or_else(|e| panic!("failed to read {values_path}: {e}"));
+        let taxonomy: ValueTaxonomy = toml::from_str(&toml_str)
+            .unwrap_or_else(|e| panic!("failed to parse taxonomy TOML: {e}"));
+        eprintln!("  {} value entries loaded", taxonomy.values.len());
+
+        for entry in &taxonomy.values {
+            if let Some(emb) = embed_description(&entry.description, &lookup) {
+                let tokens_in_desc = entry.description.split_whitespace().count();
+                let matched = entry.description
+                    .split_whitespace()
+                    .filter(|t| {
+                        let clean: String = t.to_lowercase()
+                            .chars()
+                            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
+                            .collect();
+                        !clean.is_empty() && lookup.embed(&clean).is_some()
+                    })
+                    .count();
+                eprintln!(
+                    "  '{}': embedded description ({}/{} tokens matched)",
+                    entry.name, matched, tokens_in_desc
+                );
+                term_embeddings.insert(entry.name.clone(), emb);
+                available_terms.push(entry.name.clone());
+            } else {
+                eprintln!("  warning: '{}' — no tokens matched in vocabulary (skipped)", entry.name);
+            }
+        }
+    } else {
+        // Fallback: single-token lookup from built-in list.
+        eprintln!("No --values file; using built-in single-token value terms.");
+        for &term in DEFAULT_VALUE_TERMS {
+            if let Some(emb) = lookup.embed(term) {
+                term_embeddings.insert(term.to_string(), emb);
+                available_terms.push(term.to_string());
+            } else {
+                eprintln!("  warning: term '{term}' not in vocabulary (skipped)");
+            }
         }
     }
+
     available_terms.sort();
-    eprintln!("  resolved {}/{} value terms", available_terms.len(), VALUE_TERMS.len());
+    eprintln!("  resolved {} value terms", available_terms.len());
+
+    if term_embeddings.is_empty() {
+        panic!("no value terms could be resolved — check taxonomy or vocabulary");
+    }
 
     // Mean-centre term embeddings for pairwise analysis.
     //
@@ -274,13 +332,14 @@ fn build_real_state(
         geometry.is_positive_definite(),
     );
 
-    // Load demo conversation for real mode
-    let demo_conv_path = demo_conv_path
-        .map(String::from)
-        .unwrap_or_else(|| "data/models/gpt2-demo-conversation.json".to_string());
-    let demo_conversation_json = std::fs::read_to_string(&demo_conv_path)
+    // Load demo conversation
+    let demo_conv_path = args.demo_conversation.as_deref()
+        .unwrap_or("data/models/gpt2-demo-conversation.json");
+    let demo_conversation_json = std::fs::read_to_string(demo_conv_path)
         .unwrap_or_else(|e| panic!("failed to read demo conversation {demo_conv_path}: {e}"));
     eprintln!("  demo conversation loaded from {demo_conv_path}");
+
+    let mode = if args.values.is_some() { "taxonomy" } else { "gpt2" };
 
     AppState {
         geometry,
@@ -288,7 +347,7 @@ fn build_real_state(
         embedding_source: Box::new(centred_source),
         available_terms,
         hidden_dim,
-        mode: "gpt2".into(),
+        mode: mode.into(),
         demo_conversation_json,
         default_config: CoherenceConfig {
             antonym_threshold: -0.15,
@@ -303,22 +362,7 @@ fn build_real_state(
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-
-    let state = if args.synthetic {
-        build_synthetic_state()
-    } else if let Some(ref gotue_path) = args.geometry {
-        let vocab_path = args.vocab.as_deref()
-            .expect("--vocab is required when --geometry is specified");
-        build_real_state(
-            gotue_path,
-            vocab_path,
-            args.demo_conversation.as_deref(),
-        )
-    } else {
-        eprintln!("error: specify --geometry <path.gotue> --vocab <vocab.json> for real model mode,");
-        eprintln!("       or --synthetic for hand-crafted demo data (development only).");
-        std::process::exit(1);
-    };
+    let state = build_state(&args);
 
     eprintln!("Mode: {} | hidden_dim: {} | terms: {}",
         state.mode, state.hidden_dim, state.available_terms.len());
