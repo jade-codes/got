@@ -69,7 +69,7 @@ pub fn api_err(
 }
 
 /// Clean a token for vocabulary lookup: lowercase, keep only alphanumeric + hyphens + apostrophes.
-pub fn clean_token(token: &str) -> String {
+fn clean_token(token: &str) -> String {
     token
         .to_lowercase()
         .chars()

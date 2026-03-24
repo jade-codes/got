@@ -27,9 +27,6 @@ pub struct ConversationRequest {
     pub messages: Vec<MessageInput>,
     pub antonym_threshold: Option<f32>,
     pub synonym_threshold: Option<f32>,
-    /// cos_Φ threshold for value detection (default: 0.3).
-    #[serde(default)]
-    pub _detection_threshold: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -420,12 +417,12 @@ pub async fn analyse_conversation(
 
     // Post-pass: compute trust_score, speaker_drift, and convergence
     compute_trust_scores(&mut turns);
-    compute_speaker_drift(&mut turns, &req.messages);
+    compute_speaker_drift(&mut turns);
     compute_convergence(&mut turns);
 
     // Build per-speaker summaries and overall assessment
     let speaker_summary = build_speaker_summaries(&turns);
-    let assessment = build_assessment(&turns, &req.messages);
+    let assessment = build_assessment(&turns);
 
     Ok(Json(ConversationResponse {
         turns,
@@ -487,7 +484,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// messages), we compare each message's VALUE ACTIVATION PROFILE — the z-score
 /// vector over all detected terms. This captures stance shifts even when the
 /// topic stays the same.
-fn compute_speaker_drift(turns: &mut [TurnAnalysis], _messages: &[MessageInput]) {
+fn compute_speaker_drift(turns: &mut [TurnAnalysis]) {
     // Collect all value terms seen in the conversation
     let all_terms: Vec<String> = if let Some(last) = turns.last() {
         last.cumulative_values.clone()
@@ -626,7 +623,7 @@ fn build_speaker_summaries(turns: &[TurnAnalysis]) -> Vec<SpeakerSummary> {
 /// Influence is computed from VALUE ACTIVATION PROFILES, not raw embeddings.
 /// GPT-2 message embeddings capture topic (similar across all messages about
 /// the same subject) but not stance. Value z-scores capture stance.
-fn build_assessment(turns: &[TurnAnalysis], _messages: &[MessageInput]) -> Assessment {
+fn build_assessment(turns: &[TurnAnalysis]) -> Assessment {
     let final_coherence = turns.last().map(|t| t.coherence_score).unwrap_or(1.0);
     let final_trust = turns.last().map(|t| t.trust_score).unwrap_or(1.0);
 
