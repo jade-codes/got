@@ -27,10 +27,10 @@ use axum::{
 };
 use clap::Parser;
 use got_core::geometry::CausalGeometry;
-use got_core::UnembeddingMatrix;
 use got_incoherence::coherence::CoherenceConfig;
-use got_incoherence::embeddings::{EmbeddingSource, PrecomputedEmbeddings, UnembeddingLookup};
+use got_incoherence::embeddings::PrecomputedEmbeddings;
 use got_web::AppState;
+use got_web::VocabLookup;
 use got_web::proxy_api::ProxyState;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -67,6 +67,12 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:3000")]
     listen: String,
 
+    /// URL of the activation server for intermediate-layer hidden states.
+    /// When set, /api/embed routes through the sidecar for real residual stream activations.
+    /// Example: http://localhost:8100
+    #[arg(long)]
+    activation_server: Option<String>,
+
     /// Run in synthetic demo mode (compiled-in 32-d embeddings).
     /// For deployment/development without a reference model.
     #[arg(long)]
@@ -98,43 +104,6 @@ struct ValueEntry {
     antonyms: Vec<String>,
 }
 
-/// Embed a description by averaging token embeddings from the reference model.
-///
-/// Tokenizes by whitespace, looks up each token in the unembedding matrix,
-/// and averages the found vectors.  This produces a multi-token concept
-/// vector in the reference model's own hidden space.
-fn embed_description(description: &str, lookup: &UnembeddingLookup) -> Option<Vec<f32>> {
-    let dim = lookup.hidden_dim();
-    let mut sum = vec![0.0f32; dim];
-    let mut matched = 0usize;
-
-    for token in description.split_whitespace() {
-        let clean: String = token
-            .to_lowercase()
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
-            .collect();
-        if clean.is_empty() {
-            continue;
-        }
-        if let Some(emb) = lookup.embed(&clean) {
-            for (s, e) in sum.iter_mut().zip(emb.iter()) {
-                *s += e;
-            }
-            matched += 1;
-        }
-    }
-
-    if matched == 0 {
-        return None;
-    }
-
-    let scale = 1.0 / matched as f32;
-    for s in sum.iter_mut() {
-        *s *= scale;
-    }
-    Some(sum)
-}
 
 // Fallback value terms when no taxonomy file is provided.
 const DEFAULT_VALUE_TERMS: &[&str] = &[
@@ -166,13 +135,7 @@ fn build_synthetic_state() -> AppState {
 
     let dim = term_embeddings.values().next().unwrap().len();
 
-    // Build Φ = I for the synthetic space
-    let mut identity = vec![0.0f32; dim * dim];
-    for i in 0..dim {
-        identity[i * dim + i] = 1.0;
-    }
-    let geometry = CausalGeometry::from_raw_gram(identity, dim)
-        .expect("identity matrix should be PD");
+    let geometry = CausalGeometry::identity(dim);
 
     let source = PrecomputedEmbeddings::from_json(demo::demo_embeddings_json())
         .expect("failed to load demo embeddings");
@@ -195,46 +158,9 @@ fn build_synthetic_state() -> AppState {
         },
         introduction_threshold: 0.0,
         proxy: ProxyState::new(),
+        vocab_lookup: None,
+        activation_server_url: None,
     }
-}
-
-/// Load a .gotue binary file into an UnembeddingMatrix.
-fn load_gotue(path: &str) -> UnembeddingMatrix {
-    let data = std::fs::read(path)
-        .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-
-    if data.len() < 14 || &data[0..4] != b"GOTU" {
-        panic!("{path}: not a valid .gotue file (bad magic)");
-    }
-
-    let mut offset = 4;
-    // version u16 LE
-    let _version = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
-    offset += 2;
-    // vocab_size u32 LE
-    let vocab_size = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-    offset += 4;
-    // hidden_dim u32 LE
-    let hidden_dim = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-    offset += 4;
-
-    let total = vocab_size * hidden_dim;
-    let total_bytes = total * 4;
-    if offset + total_bytes > data.len() {
-        panic!(
-            "{path}: truncated — need {} bytes from offset {}, file has {}",
-            total_bytes, offset, data.len()
-        );
-    }
-
-    let mut values = Vec::with_capacity(total);
-    let float_slice = &data[offset..offset + total_bytes];
-    for chunk in float_slice.chunks_exact(4) {
-        values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
-    }
-
-    UnembeddingMatrix::new(vocab_size, hidden_dim, values)
-        .expect("unembedding data length mismatch")
 }
 
 /// Build application state from the reference model and value terms.
@@ -244,76 +170,124 @@ fn build_state(args: &Args) -> AppState {
     let vocab_path = args.vocab.as_deref()
         .expect("--vocab is required when not using --synthetic");
 
-    eprintln!("Loading unembedding matrix from {gotue_path}...");
-    let matrix = load_gotue(gotue_path);
-    eprintln!(
-        "  {} vocab × {} hidden dim",
-        matrix.vocab_size, matrix.hidden_dim
-    );
+    eprintln!("Loading value terms from {gotue_path} (selective)...");
 
-    let hidden_dim = matrix.hidden_dim;
+    // Collect all tokens we need to look up
+    let mut needed_tokens: Vec<String> = Vec::new();
 
-    eprintln!("Loading vocabulary from {vocab_path}...");
+    let taxonomy = if let Some(ref values_path) = args.values {
+        eprintln!("Loading value taxonomy from {values_path}...");
+        let toml_str = std::fs::read_to_string(values_path)
+            .unwrap_or_else(|e| panic!("failed to read {values_path}: {e}"));
+        let tax: ValueTaxonomy = toml::from_str(&toml_str)
+            .unwrap_or_else(|e| panic!("failed to parse taxonomy TOML: {e}"));
+        eprintln!("  {} value entries loaded", tax.values.len());
+
+        // Collect all tokens from descriptions
+        for entry in &tax.values {
+            for token in entry.description.split_whitespace() {
+                let clean: String = token.to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
+                    .collect();
+                if !clean.is_empty() {
+                    needed_tokens.push(clean);
+                }
+            }
+        }
+        Some(tax)
+    } else {
+        // Fallback: single-token lookup
+        for &term in DEFAULT_VALUE_TERMS {
+            needed_tokens.push(term.to_string());
+        }
+        None
+    };
+
+    needed_tokens.sort();
+    needed_tokens.dedup();
+
+    // Load .gotue file and build full vocab lookup.
+    // The file stays in memory for on-demand row reads (embed endpoint).
+    // Load .gotue file — stays in memory for the VocabLookup
+    let gotue_data = std::fs::read(gotue_path)
+        .unwrap_or_else(|e| panic!("failed to read {gotue_path}: {e}"));
+    if gotue_data.len() < 14 || &gotue_data[0..4] != b"GOTU" {
+        panic!("{gotue_path}: not a valid .gotue file");
+    }
+    let vocab_size = u32::from_le_bytes(gotue_data[6..10].try_into().unwrap()) as usize;
+    let hidden_dim = u32::from_le_bytes(gotue_data[10..14].try_into().unwrap()) as usize;
+    let gotue_data_start = 14;
+    eprintln!("  {} vocab × {} hidden dim", vocab_size, hidden_dim);
+
+    // Build full vocab index
     let vocab_json = std::fs::read_to_string(vocab_path)
         .unwrap_or_else(|e| panic!("failed to read {vocab_path}: {e}"));
     let vocab_raw: Vec<String> = serde_json::from_str(&vocab_json)
         .unwrap_or_else(|e| panic!("failed to parse vocab JSON: {e}"));
 
-    // Strip BPE prefix (Ġ) so terms like "honesty" match "Ġhonesty"
-    let vocab_clean: Vec<String> = vocab_raw
-        .iter()
-        .map(|t| t.replace('Ġ', ""))
-        .collect();
+    let mut vocab_index: HashMap<String, usize> = HashMap::with_capacity(vocab_size);
+    for (idx, tok) in vocab_raw.iter().enumerate() {
+        if idx >= vocab_size { break; }
+        let clean = tok.replace('Ġ', "").to_lowercase();
+        vocab_index.entry(clean).or_insert(idx);
+    }
+    eprintln!("  vocabulary index: {} entries", vocab_index.len());
 
-    // Build lookup with cleaned vocab
-    let lookup = UnembeddingLookup::new(vocab_clean, matrix)
-        .expect("vocab/matrix mismatch");
+    // Build VocabLookup for the embed endpoint
+    let vocab_lookup = VocabLookup {
+        index: vocab_index,
+        data: gotue_data,
+        data_start: gotue_data_start,
+        hidden_dim,
+    };
 
-    // Resolve value terms to embeddings in the reference model's hidden space.
+    // Extract needed token embeddings for value terms
+    let mut token_embeddings = HashMap::new();
+    for token in &needed_tokens {
+        if let Some(emb) = vocab_lookup.embed(token) {
+            token_embeddings.insert(token.clone(), emb);
+        }
+    }
+    eprintln!("  loaded {}/{} token embeddings", token_embeddings.len(), needed_tokens.len());
+
+    // Resolve value terms to embeddings
     let mut term_embeddings = HashMap::new();
     let mut available_terms = Vec::new();
 
-    if let Some(ref values_path) = args.values {
-        // Taxonomy mode: embed descriptions by averaging token vectors.
-        eprintln!("Loading value taxonomy from {values_path}...");
-        let toml_str = std::fs::read_to_string(values_path)
-            .unwrap_or_else(|e| panic!("failed to read {values_path}: {e}"));
-        let taxonomy: ValueTaxonomy = toml::from_str(&toml_str)
-            .unwrap_or_else(|e| panic!("failed to parse taxonomy TOML: {e}"));
-        eprintln!("  {} value entries loaded", taxonomy.values.len());
-
-        for entry in &taxonomy.values {
-            if let Some(emb) = embed_description(&entry.description, &lookup) {
-                let tokens_in_desc = entry.description.split_whitespace().count();
-                let matched = entry.description
-                    .split_whitespace()
-                    .filter(|t| {
-                        let clean: String = t.to_lowercase()
-                            .chars()
-                            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
-                            .collect();
-                        !clean.is_empty() && lookup.embed(&clean).is_some()
-                    })
-                    .count();
-                eprintln!(
-                    "  '{}': embedded description ({}/{} tokens matched)",
-                    entry.name, matched, tokens_in_desc
-                );
-                term_embeddings.insert(entry.name.clone(), emb);
+    if let Some(ref tax) = taxonomy {
+        for entry in &tax.values {
+            // Average token embeddings from the description
+            let mut sum = vec![0.0f32; hidden_dim];
+            let mut matched = 0usize;
+            let total = entry.description.split_whitespace().count();
+            for token in entry.description.split_whitespace() {
+                let clean: String = token.to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
+                    .collect();
+                if let Some(emb) = token_embeddings.get(&clean) {
+                    for (s, e) in sum.iter_mut().zip(emb.iter()) { *s += e; }
+                    matched += 1;
+                }
+            }
+            if matched > 0 {
+                let scale = 1.0 / matched as f32;
+                for s in sum.iter_mut() { *s *= scale; }
+                eprintln!("  '{}': {}/{} tokens matched", entry.name, matched, total);
+                term_embeddings.insert(entry.name.clone(), sum);
                 available_terms.push(entry.name.clone());
             } else {
-                eprintln!("  warning: '{}' — no tokens matched in vocabulary (skipped)", entry.name);
+                eprintln!("  warning: '{}' — no tokens matched (skipped)", entry.name);
             }
         }
     } else {
-        // Fallback: single-token lookup from built-in list.
-        eprintln!("No --values file; using built-in single-token value terms.");
         for &term in DEFAULT_VALUE_TERMS {
-            if let Some(emb) = lookup.embed(term) {
-                term_embeddings.insert(term.to_string(), emb);
+            if let Some(emb) = token_embeddings.get(term) {
+                term_embeddings.insert(term.to_string(), emb.clone());
                 available_terms.push(term.to_string());
             } else {
-                eprintln!("  warning: term '{term}' not in vocabulary (skipped)");
+                eprintln!("  warning: term '{term}' not found (skipped)");
             }
         }
     }
@@ -362,26 +336,44 @@ fn build_state(args: &Args) -> AppState {
     let centred_source = PrecomputedEmbeddings::new(centred_embeddings)
         .expect("failed to build centred embeddings source");
 
-    // Build Φ = I (identity).
-    //
-    // Detection uses z-scored logits (raw dot product h·u_i), not cos_Φ.
-    // Pairwise analysis uses cos_I(u_i, u_j) = standard cosine, which
-    // gives meaningful structure: bravery↔courage ≈ 0.76, efficiency↔tradition ≈ 0.24.
-    //
-    // The full UᵀU and term-focused EᵀE geometries both collapse —
-    // all cos_Φ values are >0.98 with no discrimination.
-    // Standard cosine in GPT-2's hidden space IS the model's geometry.
-    eprintln!("Building Φ = I ({hidden_dim}×{hidden_dim}) for standard cosine pairwise...");
-    let mut identity = vec![0.0f32; hidden_dim * hidden_dim];
-    for i in 0..hidden_dim {
-        identity[i * hidden_dim + i] = 1.0;
-    }
-    let geometry = CausalGeometry::from_raw_gram(identity, hidden_dim)
-        .expect("identity matrix should be PD");
-    eprintln!(
-        "  positive definite: {}",
-        geometry.is_positive_definite(),
-    );
+    // Compute Φ = UᵀU — the causal inner product.
+    // Load the full unembedding matrix, compute the d×d Gram matrix, then drop U.
+    eprintln!("Computing Φ = UᵀU ({hidden_dim}×{hidden_dim}) from {gotue_path}...");
+    let geometry = {
+        let data = std::fs::read(gotue_path)
+            .unwrap_or_else(|e| panic!("failed to read {gotue_path}: {e}"));
+        let mut offset = 6; // skip magic + version
+        let vocab_size = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        let hd = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        assert_eq!(hd, hidden_dim);
+
+        let total_bytes = vocab_size * hidden_dim * 4;
+        let float_data = &data[offset..offset + total_bytes];
+
+        // Build faer matrix U (V × d) and compute Φ = UᵀU (d × d)
+        let u_mat = faer::Mat::from_fn(vocab_size, hidden_dim, |i, j| {
+            let idx = (i * hidden_dim + j) * 4;
+            f32::from_le_bytes(float_data[idx..idx + 4].try_into().unwrap()) as f64
+        });
+        eprintln!("  U loaded: {} × {}, computing UᵀU...", vocab_size, hidden_dim);
+        let phi = u_mat.transpose() * &u_mat; // d × d
+        eprintln!("  UᵀU computed");
+
+        // Convert to flat f32 row-major
+        let mut gram = vec![0.0f32; hidden_dim * hidden_dim];
+        for i in 0..hidden_dim {
+            for j in 0..hidden_dim {
+                gram[i * hidden_dim + j] = phi.read(i, j) as f32;
+            }
+        }
+
+        // U is dropped here — only the d×d Gram matrix is kept
+        CausalGeometry::from_raw_gram(gram, hidden_dim)
+            .expect("UᵀU should be positive semi-definite")
+    };
+    eprintln!("  positive definite: {}", geometry.is_positive_definite());
 
     // Load demo conversation
     let demo_conv_path = args.demo_conversation.as_deref()
@@ -407,6 +399,8 @@ fn build_state(args: &Args) -> AppState {
         },
         introduction_threshold: 1.0,
         proxy: ProxyState::new(),
+        vocab_lookup: Some(vocab_lookup),
+        activation_server_url: args.activation_server.clone(),
     }
 }
 
@@ -450,6 +444,10 @@ async fn main() {
         .route("/api/conversation/analyse", post(api::analyse_conversation))
         .route("/api/embed", post(got_web::embed_api::embed_text))
         .route("/api/chat", post(got_web::chat_api::chat))
+        // Metrics endpoints
+        .route("/api/coherence", post(got_web::metrics_api::coherence))
+        .route("/api/collapse", post(got_web::metrics_api::collapse))
+        .route("/api/compare", post(got_web::metrics_api::compare))
         // Proxy endpoints
         .route("/api/proxy/session", post(got_web::proxy_api::create_session))
         .route("/api/proxy/session/:id/observe", post(got_web::proxy_api::observe))

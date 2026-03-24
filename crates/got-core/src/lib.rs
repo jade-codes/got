@@ -1,3 +1,4 @@
+pub mod coherence;
 pub mod geometry;
 pub mod manifold;
 

@@ -2,6 +2,7 @@ pub mod api;
 pub mod chat_api;
 pub mod demo;
 pub mod embed_api;
+pub mod metrics_api;
 pub mod proxy_api;
 
 use std::collections::HashMap;
@@ -9,6 +10,36 @@ use std::collections::HashMap;
 use got_core::geometry::CausalGeometry;
 use got_incoherence::coherence::CoherenceConfig;
 use got_incoherence::embeddings::EmbeddingSource;
+
+/// Full-vocabulary lookup that reads embedding rows on demand from the .gotue bytes.
+pub struct VocabLookup {
+    /// Token (lowercase, BPE-stripped) → row index in the unembedding matrix.
+    pub index: HashMap<String, usize>,
+    /// Raw .gotue file bytes (kept in memory for row lookups).
+    pub data: Vec<u8>,
+    /// Byte offset where the float data starts in the file.
+    pub data_start: usize,
+    pub hidden_dim: usize,
+}
+
+impl VocabLookup {
+    /// Look up an embedding for a token. Returns None if not in vocabulary.
+    pub fn embed(&self, token: &str) -> Option<Vec<f32>> {
+        let clean = token.trim().to_lowercase();
+        let row_idx = *self.index.get(&clean)?;
+        let row_bytes = self.hidden_dim * 4;
+        let start = self.data_start + row_idx * row_bytes;
+        if start + row_bytes > self.data.len() {
+            return None;
+        }
+        Some(
+            self.data[start..start + row_bytes]
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                .collect(),
+        )
+    }
+}
 
 /// Shared application state, built at startup and shared across all handlers.
 pub struct AppState {
@@ -25,4 +56,9 @@ pub struct AppState {
     pub introduction_threshold: f32,
     /// Proxy session state for closed-source model monitoring.
     pub proxy: proxy_api::ProxyState,
+    /// Full-vocabulary lookup for embedding arbitrary text. None in synthetic mode.
+    pub vocab_lookup: Option<VocabLookup>,
+    /// URL of the activation server for intermediate-layer hidden states.
+    /// When set, /api/embed routes through the sidecar instead of bag-of-words.
+    pub activation_server_url: Option<String>,
 }

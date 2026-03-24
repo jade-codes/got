@@ -1076,6 +1076,7 @@ dependencies = [
  "axum",
  "clap",
  "ed25519-dalek",
+ "faer",
  "got-core",
  "got-incoherence",
  "got-proxy",

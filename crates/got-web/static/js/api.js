@@ -78,6 +78,33 @@ export async function proxyManifold(sessionId) {
   return res.json();
 }
 
+export async function fetchCoherence(ordering, embeddings = [], sharpness = 1.0) {
+  const res = await fetch('/api/coherence', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ordering, embeddings, sharpness }),
+  });
+  return res.json();
+}
+
+export async function fetchCollapse(probeTerms = []) {
+  const res = await fetch('/api/collapse', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ probe_terms: probeTerms }),
+  });
+  return res.json();
+}
+
+export async function fetchCompare(comparisonGotuePath, probeTerms = []) {
+  const res = await fetch('/api/compare', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comparison_gotue_path: comparisonGotuePath, probe_terms: probeTerms }),
+  });
+  return res.json();
+}
+
 export async function proxySnapshot(sessionId, attestationType) {
   const body = {};
   if (attestationType) body.attestation_type = attestationType;

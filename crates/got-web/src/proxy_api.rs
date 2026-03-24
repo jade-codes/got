@@ -115,7 +115,10 @@ pub struct CreateSessionResponse {
 #[derive(Debug, Deserialize)]
 pub struct ObserveRequest {
     /// The text to observe. The proxy embeds this via the session's embedding endpoint.
-    pub text: String,
+    /// Provide either `text` or `embedding` — if both are given, `embedding` takes priority.
+    pub text: Option<String>,
+    /// Pre-computed embedding vector (for demo replay or pre-embedded content).
+    pub embedding: Option<Vec<f32>>,
     /// Speaker ID: "assistant" for the model, "user" for the human.
     /// Defaults to "assistant" if omitted (backward compatible).
     #[serde(default = "default_speaker")]
@@ -307,13 +310,7 @@ pub async fn create_session(
             (source, None, state.hidden_dim)
         };
 
-    // Build Φ = I for the embedding space.
-    let mut identity = vec![0.0f32; hidden_dim * hidden_dim];
-    for i in 0..hidden_dim {
-        identity[i * hidden_dim + i] = 1.0;
-    }
-    let geometry = got_core::geometry::CausalGeometry::from_raw_gram(identity, hidden_dim)
-        .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("geometry: {e}")))?;
+    let geometry = got_core::geometry::CausalGeometry::identity(hidden_dim);
 
     let session = ProxySession::new(
         session_id.clone(),
@@ -358,19 +355,21 @@ pub async fn observe(
     Path(session_id): Path<String>,
     Json(req): Json<ObserveRequest>,
 ) -> Result<Json<ObserveResponse>, (StatusCode, Json<ProxyErrorResponse>)> {
-    // Embed the text via the session's embedding endpoint.
-    let embedding = {
+    // Resolve embedding: use pre-computed if provided, otherwise embed text.
+    let embedding = if let Some(emb) = req.embedding {
+        emb
+    } else if let Some(ref text) = req.text {
         let configs = state.proxy.embedding_configs.lock().await;
         if let Some(config) = configs.get(&session_id) {
-            embed_text_via_api(&req.text, config)
+            embed_text_via_api(text, config)
                 .await
                 .map_err(|e| proxy_err(StatusCode::BAD_GATEWAY, format!("embed: {e}")))?
         } else {
-            // Fallback: average reference model token embeddings (legacy path).
+            // Fallback: average reference model token embeddings.
             let dim = state.hidden_dim;
             let mut sum = vec![0.0f32; dim];
             let mut matched = 0usize;
-            for token in req.text.split_whitespace() {
+            for token in text.split_whitespace() {
                 let clean: String = token.to_lowercase()
                     .chars()
                     .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
@@ -387,6 +386,8 @@ pub async fn observe(
             }
             sum
         }
+    } else {
+        return Err(proxy_err(StatusCode::BAD_REQUEST, "provide either 'text' or 'embedding'"));
     };
 
     let mut sessions = state.proxy.sessions.lock().await;

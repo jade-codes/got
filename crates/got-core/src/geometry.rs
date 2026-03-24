@@ -31,6 +31,18 @@ pub enum GeometryError {
     },
 }
 
+/// Result of projecting probe directions through the causal geometry.
+pub struct ValueProjection {
+    /// k×k projected Gram matrix G_W = WᵀΦW, row-major.
+    pub gram_w: Vec<f32>,
+    /// Eigenvalues of G_W, sorted descending.
+    pub eigenvalues: Vec<f32>,
+    /// Effective dimensionality (participation ratio). ∈ [1, k].
+    pub dim_eff: f32,
+    /// Number of probes (k).
+    pub k: usize,
+}
+
 /// Precomputed causal geometry derived from an unembedding matrix.
 ///
 /// Holds Φ = UᵀU (d × d) and metadata about the matrix's rank / regularisation.
@@ -88,6 +100,18 @@ fn is_identity_matrix(gram: &[f32], d: usize) -> bool {
 }
 
 impl CausalGeometry {
+    /// Create an identity geometry (Φ = I) without allocating the full d×d matrix
+    /// or running a Cholesky check. All inner products degenerate to plain dot products.
+    pub fn identity(hidden_dim: usize) -> Self {
+        Self {
+            gram: Vec::new(), // not used when is_identity = true
+            hidden_dim,
+            is_full_rank: true,
+            epsilon: 0.0,
+            is_identity: true,
+        }
+    }
+
     /// Build the causal geometry from an unembedding matrix.
     ///
     /// Computes Φ = UᵀU using `faer` for efficient matrix multiplication.
@@ -377,6 +401,81 @@ impl CausalGeometry {
         result
     }
 
+    /// Compute the value-projected Gram matrix G_W = WᵀΦW and its eigenvalues.
+    ///
+    /// `probe_weights` is a slice of k probe weight vectors, each of dimension d.
+    /// Returns a `ValueProjection` with the k×k matrix, eigenvalues, and dim_eff.
+    pub fn value_projected_gram(
+        &self,
+        probe_weights: &[&[f32]],
+    ) -> Result<ValueProjection, GeometryError> {
+        let k = probe_weights.len();
+        if k == 0 {
+            return Err(GeometryError::DimensionMismatch { expected: 1, got: 0 });
+        }
+        for w in probe_weights {
+            self.check_vec(w)?;
+        }
+
+        // Compute ΦW: for each probe wⱼ, compute Φwⱼ (d-dimensional vector)
+        let mut phi_w: Vec<Vec<f32>> = Vec::with_capacity(k);
+        for w in probe_weights {
+            phi_w.push(self.gram_vec(w)?);
+        }
+
+        // Compute G_W = WᵀΦW: G_W[i][j] = wᵢᵀ (Φwⱼ)
+        let mut gram_w = vec![0.0f32; k * k];
+        for i in 0..k {
+            for j in i..k {
+                let dot: f32 = probe_weights[i]
+                    .iter()
+                    .zip(phi_w[j].iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+                gram_w[i * k + j] = dot;
+                gram_w[j * k + i] = dot; // symmetric
+            }
+        }
+
+        // Eigendecomposition of the k×k symmetric matrix using faer
+        let mat = faer::Mat::from_fn(k, k, |i, j| gram_w[i * k + j] as f64);
+        let eigendecomp = mat.selfadjoint_eigendecomposition(faer::Side::Lower);
+        let eig_vals = eigendecomp.s().column_vector();
+
+        let mut eigenvalues: Vec<f32> = (0..k)
+            .map(|i| eig_vals.read(i) as f32)
+            .collect();
+        eigenvalues.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Participation ratio: dim_eff = (Σλᵢ)² / Σλᵢ²
+        // Use only positive eigenvalues (numerical noise can produce tiny negatives)
+        let sum: f32 = eigenvalues.iter().filter(|&&v| v > 0.0).sum();
+        let sum_sq: f32 = eigenvalues.iter().filter(|&&v| v > 0.0).map(|v| v * v).sum();
+        let dim_eff = if sum_sq > f32::EPSILON {
+            (sum * sum) / sum_sq
+        } else {
+            1.0
+        };
+
+        Ok(ValueProjection {
+            gram_w,
+            eigenvalues,
+            dim_eff,
+            k,
+        })
+    }
+
+    /// Compute effective value dimensionality (participation ratio of G_W eigenvalues).
+    ///
+    /// Shorthand for `value_projected_gram(probe_weights)?.dim_eff`.
+    /// Returns dim_eff ∈ [1, k].
+    pub fn effective_value_dimensionality(
+        &self,
+        probe_weights: &[&[f32]],
+    ) -> Result<f32, GeometryError> {
+        Ok(self.value_projected_gram(probe_weights)?.dim_eff)
+    }
+
     // --- internal helpers ---
 
     pub(crate) fn check_vec(&self, v: &[f32]) -> Result<(), GeometryError> {
@@ -410,6 +509,93 @@ pub fn euclidean_cosine(u: &[f32], v: &[f32]) -> f32 {
         return 0.0;
     }
     (dot / (norm_u * norm_v)).clamp(-1.0, 1.0)
+}
+
+/// Result of comparing value geometry between two models.
+pub struct AlignmentDistance {
+    /// Global Frobenius distance: ‖Φ_A − Φ_B‖_F / max(‖Φ_A‖_F, ‖Φ_B‖_F).
+    pub global_distance: f32,
+    /// Probe-projected distance d_V(A, B), if probes were provided.
+    pub probe_projected_distance: Option<f32>,
+    /// Per-probe distances, if probes were provided.
+    pub per_probe_distances: Option<Vec<f32>>,
+}
+
+/// Compare value geometry between two models.
+///
+/// Global distance: d(A,B) = ‖Φ_A − Φ_B‖_F / max(‖Φ_A‖_F, ‖Φ_B‖_F)
+///
+/// Probe-projected distance (when probes provided):
+/// d_V(A,B) = (1/k) Σⱼ |wⱼᵀ(Φ_A − Φ_B)wⱼ| / max(|wⱼᵀΦ_Awⱼ|, |wⱼᵀΦ_Bwⱼ|)
+pub fn value_alignment_distance(
+    geo_a: &CausalGeometry,
+    geo_b: &CausalGeometry,
+    probe_weights: Option<&[&[f32]]>,
+) -> Result<AlignmentDistance, GeometryError> {
+    if geo_a.hidden_dim() != geo_b.hidden_dim() {
+        return Err(GeometryError::DimensionMismatch {
+            expected: geo_a.hidden_dim(),
+            got: geo_b.hidden_dim(),
+        });
+    }
+
+    // Global Frobenius distance: ‖Φ_A − Φ_B‖_F / max(‖Φ_A‖_F, ‖Φ_B‖_F)
+    let frob_delta_sq: f32 = geo_a
+        .gram()
+        .iter()
+        .zip(geo_b.gram().iter())
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum();
+    let frob_a: f32 = geo_a.gram().iter().map(|x| x * x).sum::<f32>().sqrt();
+    let frob_b: f32 = geo_b.gram().iter().map(|x| x * x).sum::<f32>().sqrt();
+    let max_frob = frob_a.max(frob_b);
+    let global_distance = if max_frob > f32::EPSILON {
+        frob_delta_sq.sqrt() / max_frob
+    } else {
+        0.0
+    };
+
+    // Probe-projected distance
+    let (probe_projected_distance, per_probe_distances) = if let Some(probes) = probe_weights {
+        if probes.is_empty() {
+            (Some(0.0), Some(Vec::new()))
+        } else {
+            let mut per_probe = Vec::with_capacity(probes.len());
+            for w in probes {
+                geo_a.check_vec(w)?;
+                let quad_a = quadratic_form_raw(geo_a.gram(), geo_a.hidden_dim(), w);
+                let quad_b = quadratic_form_raw(geo_b.gram(), geo_b.hidden_dim(), w);
+                let max_quad = quad_a.abs().max(quad_b.abs());
+                let d_w = if max_quad > f32::EPSILON {
+                    (quad_a - quad_b).abs() / max_quad
+                } else {
+                    0.0
+                };
+                per_probe.push(d_w);
+            }
+            let mean = per_probe.iter().sum::<f32>() / per_probe.len() as f32;
+            (Some(mean), Some(per_probe))
+        }
+    } else {
+        (None, None)
+    };
+
+    Ok(AlignmentDistance {
+        global_distance,
+        probe_projected_distance,
+        per_probe_distances,
+    })
+}
+
+/// Compute wᵀΦw from raw gram data.
+fn quadratic_form_raw(gram: &[f32], d: usize, w: &[f32]) -> f32 {
+    let mut result = 0.0f32;
+    for i in 0..d {
+        for j in 0..d {
+            result += w[i] * gram[i * d + j] * w[j];
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -721,5 +907,153 @@ mod tests {
 
         let pd = geom.is_positive_definite();
         assert!(!pd, "rank-1 matrix with large trace should not be PD");
+    }
+
+    // --- Value dimensionality (manifold collapse) tests ---
+
+    #[test]
+    fn dim_eff_identity_metric() {
+        // Φ = I, orthogonal probes → G_W = I_k → all eigenvalues = 1 → dim_eff = k
+        let geom = CausalGeometry::from_raw_gram(vec![
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ], 4).unwrap();
+
+        let w1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
+        let w2: Vec<f32> = vec![0.0, 1.0, 0.0, 0.0];
+        let w3: Vec<f32> = vec![0.0, 0.0, 1.0, 0.0];
+        let probes: Vec<&[f32]> = vec![&w1, &w2, &w3];
+
+        let proj = geom.value_projected_gram(&probes).unwrap();
+        assert_eq!(proj.k, 3);
+        assert!((proj.dim_eff - 3.0).abs() < 0.01, "expected dim_eff ≈ 3, got {}", proj.dim_eff);
+    }
+
+    #[test]
+    fn dim_eff_collapsed_metric() {
+        // Φ = vvᵀ (rank 1), probes aligned with v → dim_eff ≈ 1
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let mut gram = vec![0.0f32; 16];
+        for i in 0..4 {
+            for j in 0..4 {
+                gram[i * 4 + j] = v[i] * v[j];
+            }
+        }
+        // Add tiny epsilon for PD
+        for i in 0..4 {
+            gram[i * 4 + i] += 1e-6;
+        }
+        let geom = CausalGeometry::from_raw_gram(gram, 4).unwrap();
+
+        // Three probes, all partially aligned with v
+        let w1: Vec<f32> = vec![1.0, 0.1, 0.0, 0.0];
+        let w2: Vec<f32> = vec![1.0, 0.0, 0.1, 0.0];
+        let w3: Vec<f32> = vec![1.0, 0.0, 0.0, 0.1];
+        let probes: Vec<&[f32]> = vec![&w1, &w2, &w3];
+
+        let dim = geom.effective_value_dimensionality(&probes).unwrap();
+        assert!(dim < 1.5, "expected dim_eff ≈ 1 for rank-1 Φ, got {dim}");
+    }
+
+    #[test]
+    fn dim_eff_partial_collapse() {
+        // Φ with two strong and one weak direction
+        let gram = vec![
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 0.001, 0.0,
+            0.0, 0.0, 0.0, 0.001,
+        ];
+        let geom = CausalGeometry::from_raw_gram(gram, 4).unwrap();
+
+        let w1: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0]; // strong
+        let w2: Vec<f32> = vec![0.0, 1.0, 0.0, 0.0]; // strong
+        let w3: Vec<f32> = vec![0.0, 0.0, 1.0, 0.0]; // weak
+        let probes: Vec<&[f32]> = vec![&w1, &w2, &w3];
+
+        let proj = geom.value_projected_gram(&probes).unwrap();
+        // Two dominant eigenvalues ≈ 1.0, one ≈ 0.001 → dim_eff ≈ 2
+        assert!(proj.dim_eff > 1.5 && proj.dim_eff < 2.5,
+            "expected dim_eff ≈ 2, got {}", proj.dim_eff);
+    }
+
+    #[test]
+    fn dim_eff_rejects_dimension_mismatch() {
+        let geom = CausalGeometry::from_raw_gram(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap();
+        let w_bad: Vec<f32> = vec![1.0, 0.0, 0.0]; // dim 3, not 2
+        let probes: Vec<&[f32]> = vec![&w_bad];
+        assert!(geom.value_projected_gram(&probes).is_err());
+    }
+
+    #[test]
+    fn dim_eff_rejects_empty_probes() {
+        let geom = CausalGeometry::from_raw_gram(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap();
+        let probes: Vec<&[f32]> = vec![];
+        assert!(geom.value_projected_gram(&probes).is_err());
+    }
+
+    // --- Value alignment distance tests ---
+
+    #[test]
+    fn alignment_distance_identical_models() {
+        let gram = vec![2.0, 0.5, 0.5, 3.0];
+        let geo_a = CausalGeometry::from_raw_gram(gram.clone(), 2).unwrap();
+        let geo_b = CausalGeometry::from_raw_gram(gram, 2).unwrap();
+
+        let w1: Vec<f32> = vec![1.0, 0.0];
+        let w2: Vec<f32> = vec![0.0, 1.0];
+        let probes: Vec<&[f32]> = vec![&w1, &w2];
+
+        let dist = value_alignment_distance(&geo_a, &geo_b, Some(&probes)).unwrap();
+        assert!(dist.global_distance < 1e-6, "identical → d=0, got {}", dist.global_distance);
+        assert!(dist.probe_projected_distance.unwrap() < 1e-6);
+        for d in dist.per_probe_distances.unwrap() {
+            assert!(d < 1e-6);
+        }
+    }
+
+    #[test]
+    fn alignment_distance_orthogonal_change() {
+        // Φ_A and Φ_B differ only in the [1,1] entry.
+        // Probe is along [1,0] — orthogonal to the change.
+        let geo_a = CausalGeometry::from_raw_gram(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap();
+        let geo_b = CausalGeometry::from_raw_gram(vec![1.0, 0.0, 0.0, 5.0], 2).unwrap();
+
+        let w: Vec<f32> = vec![1.0, 0.0];
+        let probes: Vec<&[f32]> = vec![&w];
+
+        let dist = value_alignment_distance(&geo_a, &geo_b, Some(&probes)).unwrap();
+        assert!(dist.global_distance > 0.1, "global should detect change");
+        assert!(
+            dist.probe_projected_distance.unwrap() < 1e-6,
+            "probe-projected should be ~0 for orthogonal change, got {}",
+            dist.probe_projected_distance.unwrap()
+        );
+    }
+
+    #[test]
+    fn alignment_distance_probe_relevant_change() {
+        // Φ_A = I, Φ_B differs specifically in probe direction [1,0]
+        let geo_a = CausalGeometry::from_raw_gram(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap();
+        let geo_b = CausalGeometry::from_raw_gram(vec![5.0, 0.0, 0.0, 1.0], 2).unwrap();
+
+        let w: Vec<f32> = vec![1.0, 0.0];
+        let probes: Vec<&[f32]> = vec![&w];
+
+        let dist = value_alignment_distance(&geo_a, &geo_b, Some(&probes)).unwrap();
+        assert!(dist.global_distance > 0.1);
+        assert!(
+            dist.probe_projected_distance.unwrap() > 0.1,
+            "probe-projected should detect change along probe direction"
+        );
+    }
+
+    #[test]
+    fn alignment_distance_dimension_mismatch() {
+        let geo_a = CausalGeometry::from_raw_gram(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap();
+        let geo_b = CausalGeometry::from_raw_gram(vec![1.0; 9], 3).unwrap();
+        assert!(value_alignment_distance(&geo_a, &geo_b, None).is_err());
     }
 }

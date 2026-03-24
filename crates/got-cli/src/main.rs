@@ -260,6 +260,57 @@ enum Command {
         format: String,
     },
 
+    /// Compare value geometry between two models.
+    Compare {
+        /// Path to first unembedding matrix file (.gotue binary).
+        #[arg(long)]
+        unembedding_a: PathBuf,
+        /// Path to second unembedding matrix file (.gotue binary).
+        #[arg(long)]
+        unembedding_b: PathBuf,
+        /// Optional path to probe set file (for probe-projected distance).
+        #[arg(long)]
+        probes: Option<PathBuf>,
+        /// Regularisation epsilon for causal geometry.
+        #[arg(long, default_value = "0.000001")]
+        epsilon: f32,
+    },
+
+    /// Report manifold collapse / effective value dimensionality.
+    CollapseReport {
+        /// Path to unembedding matrix file (.gotue binary).
+        #[arg(long)]
+        unembedding: PathBuf,
+        /// Path to probe set file (JSON).
+        #[arg(long)]
+        probes: PathBuf,
+        /// Regularisation epsilon for causal geometry.
+        #[arg(long, default_value = "0.000001")]
+        epsilon: f32,
+    },
+
+    /// Compute value-ordering coherence scores for activations.
+    Coherence {
+        /// Path to activations file (.gotact binary).
+        #[arg(long)]
+        activations: PathBuf,
+        /// Path to unembedding matrix file (.gotue binary).
+        #[arg(long)]
+        unembedding: PathBuf,
+        /// Path to value-ordering constraints JSON file.
+        #[arg(long)]
+        ordering: PathBuf,
+        /// Which layer to analyse.
+        #[arg(long)]
+        layer: usize,
+        /// Sharpness parameter α (default 1.0). Higher = more decisive scoring.
+        #[arg(long, default_value = "1.0")]
+        sharpness: f32,
+        /// Regularisation epsilon for causal geometry.
+        #[arg(long, default_value = "0.000001")]
+        epsilon: f32,
+    },
+
     /// Perform a key rotation ceremony with mutual cross-signatures.
     RotateKey {
         /// Path to the old (current) secret key.
@@ -425,6 +476,25 @@ fn main() -> Result<()> {
             synonym_threshold,
             &format,
         ),
+        Command::Compare {
+            unembedding_a,
+            unembedding_b,
+            probes,
+            epsilon,
+        } => cmd_compare(unembedding_a, unembedding_b, probes, epsilon),
+        Command::CollapseReport {
+            unembedding,
+            probes,
+            epsilon,
+        } => cmd_collapse_report(unembedding, probes, epsilon),
+        Command::Coherence {
+            activations,
+            unembedding,
+            ordering,
+            layer,
+            sharpness,
+            epsilon,
+        } => cmd_coherence(activations, unembedding, ordering, layer, sharpness, epsilon),
         Command::RotateKey {
             old_key,
             new_key,
@@ -1132,6 +1202,175 @@ fn cmd_coherence_check(
             if !report.unresolved.is_empty() {
                 println!("Warning: unresolved terms: {:?}", report.unresolved);
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_compare(
+    unembedding_a_path: PathBuf,
+    unembedding_b_path: PathBuf,
+    probes_path: Option<PathBuf>,
+    epsilon: f32,
+) -> Result<()> {
+    use got_core::geometry::value_alignment_distance;
+
+    let ue_a = load_unembedding(&unembedding_a_path)?;
+    let ue_b = load_unembedding(&unembedding_b_path)?;
+    let geo_a = CausalGeometry::from_unembedding(&ue_a, epsilon);
+    let geo_b = CausalGeometry::from_unembedding(&ue_b, epsilon);
+
+    let (probe_refs, probe_set) = if let Some(ref path) = probes_path {
+        let json = fs::read_to_string(path)
+            .with_context(|| format!("failed to read probes: {path:?}"))?;
+        let ps: ProbeSet = serde_json::from_str(&json).context("failed to parse probes JSON")?;
+        let weights: Vec<Vec<f32>> = ps.probes.iter().map(|p| p.weights.clone()).collect();
+        (Some(weights), Some(ps))
+    } else {
+        (None, None)
+    };
+
+    let probes_slices: Option<Vec<&[f32]>> = probe_refs
+        .as_ref()
+        .map(|ws| ws.iter().map(|w| w.as_slice()).collect());
+
+    let dist = value_alignment_distance(
+        &geo_a,
+        &geo_b,
+        probes_slices.as_deref(),
+    )
+    .context("alignment distance computation failed")?;
+
+    println!("Value alignment distance");
+    println!("  Model A:  {:?}", unembedding_a_path);
+    println!("  Model B:  {:?}", unembedding_b_path);
+    println!("  Global distance (Frobenius): {:.6}", dist.global_distance);
+
+    if let (Some(d_v), Some(per_probe)) = (&dist.probe_projected_distance, &dist.per_probe_distances) {
+        println!("  Probe-projected distance:    {:.6}", d_v);
+        println!();
+        if let Some(ref ps) = probe_set {
+            for (i, (&d_w, probe)) in per_probe.iter().zip(ps.probes.iter()).enumerate() {
+                println!("    [{i}] {}: {d_w:.6}", probe.dimension_name);
+            }
+        } else {
+            for (i, &d_w) in per_probe.iter().enumerate() {
+                println!("    [{i}] {d_w:.6}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_collapse_report(
+    unembedding_path: PathBuf,
+    probes_path: PathBuf,
+    epsilon: f32,
+) -> Result<()> {
+    let ue = load_unembedding(&unembedding_path)?;
+    let geometry = CausalGeometry::from_unembedding(&ue, epsilon);
+
+    let probes_json = fs::read_to_string(&probes_path)
+        .with_context(|| format!("failed to read probes file: {probes_path:?}"))?;
+    let probe_set: ProbeSet = serde_json::from_str(&probes_json)
+        .context("failed to parse probes JSON")?;
+
+    if probe_set.probes.is_empty() {
+        bail!("probe set is empty");
+    }
+
+    let weights: Vec<Vec<f32>> = probe_set.probes.iter().map(|p| p.weights.clone()).collect();
+    let weight_refs: Vec<&[f32]> = weights.iter().map(|w| w.as_slice()).collect();
+
+    let proj = geometry.value_projected_gram(&weight_refs)
+        .context("value projection failed")?;
+
+    let ratio = proj.dim_eff / proj.k as f32;
+    let assessment = if ratio > 0.8 {
+        "fully spread"
+    } else if ratio > 0.4 {
+        "partially collapsed"
+    } else {
+        "severely collapsed"
+    };
+
+    println!("Manifold collapse report (layer {})", probe_set.layer);
+    println!("  Probes (k):    {}", proj.k);
+    println!("  dim_eff:       {:.3}", proj.dim_eff);
+    println!("  dim_eff / k:   {:.3}", ratio);
+    println!("  Assessment:    {assessment}");
+    println!();
+    println!("  Eigenvalues of G_W (descending):");
+    for (i, &ev) in proj.eigenvalues.iter().enumerate() {
+        let pct = if proj.eigenvalues.iter().sum::<f32>() > 0.0 {
+            100.0 * ev / proj.eigenvalues.iter().sum::<f32>()
+        } else {
+            0.0
+        };
+        println!("    λ_{i} = {ev:.6}  ({pct:.1}%)");
+    }
+    println!();
+    println!("  Probe dimensions:");
+    for p in &probe_set.probes {
+        println!("    - {}", p.dimension_name);
+    }
+
+    Ok(())
+}
+
+fn cmd_coherence(
+    activations_path: PathBuf,
+    unembedding_path: PathBuf,
+    ordering_path: PathBuf,
+    layer: usize,
+    sharpness: f32,
+    epsilon: f32,
+) -> Result<()> {
+    use got_core::coherence::{conversational_coherence, ValueOrdering};
+
+    let all_activations = load_activations(&activations_path)?;
+    let ue = load_unembedding(&unembedding_path)?;
+    let geometry = CausalGeometry::from_unembedding(&ue, epsilon);
+
+    let ordering = ValueOrdering::from_json(&ordering_path)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Filter activations for the target layer
+    let layer_acts: Vec<&LayerActivation> = all_activations
+        .iter()
+        .filter(|a| a.layer == layer)
+        .collect();
+    if layer_acts.is_empty() {
+        bail!("no activations found for layer {layer}");
+    }
+
+    let hidden_states: Vec<Vec<f32>> = layer_acts
+        .iter()
+        .map(|a| a.values.clone())
+        .collect();
+
+    let report = conversational_coherence(&hidden_states, &ordering, &geometry, sharpness)
+        .context("coherence computation failed")?;
+
+    println!("Value-ordering coherence (layer {layer}, α={sharpness})");
+    println!("  Positions: {}", report.per_position.len());
+    println!("  Mean:      {:.4}", report.mean);
+    println!("  Min:       {:.4}", report.min);
+    println!("  Max:       {:.4}", report.max);
+    println!();
+
+    for (i, score) in report.per_position.iter().enumerate() {
+        let marker = if *score < 0.5 { " ← VIOLATED" } else { "" };
+        println!("  [{i:3}] {score:.4}{marker}");
+    }
+
+    if !report.violated_constraints.is_empty() {
+        println!();
+        println!("Violated constraints:");
+        for (pos, label) in &report.violated_constraints {
+            println!("  position {pos}: {label}");
         }
     }
 

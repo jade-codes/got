@@ -8,7 +8,7 @@
 
 import { fetchDemoConversation, analyseConversation, embedText,
          createProxySession, proxyObserve, proxyManifold, proxySnapshot,
-         chatWithModel } from './api.js';
+         chatWithModel, fetchCoherence, fetchCollapse, fetchCompare } from './api.js';
 import { scoreColour, trustColour } from './shared/colors.js';
 import { esc, getTermList, findPair } from './shared/utils.js';
 import { renderTimeline, updateTimelineHighlight } from './analyse/timeline.js';
@@ -168,6 +168,7 @@ async function handleSend() {
     // Run coherence analysis
     await runCoherenceAnalysis();
     updateDeviationTimeline();
+    updateCoherenceTab();
 
   } catch (err) {
     console.error('Send failed:', err);
@@ -269,6 +270,7 @@ async function loadDemo() {
       updateTopValuesFromTurn(lastTurn);
     }
     updateDeviationTimeline();
+    updateCoherenceTab();
 
   } catch (err) {
     console.error('Failed to load demo:', err);
@@ -636,6 +638,268 @@ function manifoldMetric(label, value, detail) {
     '</div>';
 }
 
+// ---- Coherence tab ----
+
+let coherenceScores = []; // per-message C(h) scores
+
+async function updateCoherenceTab() {
+  if (allMessages.length < 2) return;
+
+  // Build ordering from available terms: pair adjacent terms as constraints
+  // Use the first few terms as dominant/subordinate pairs
+  const terms = Object.keys(allMessages[0]?.embedding ? {} : {});
+  // Simple approach: use embeddings from allMessages
+  const embeddings = allMessages.map(m => m.embedding).filter(Boolean);
+  if (embeddings.length === 0) return;
+
+  // Build default ordering from available value terms (positive > negative pairs)
+  const defaultPairs = [
+    { dominant: 'honesty', subordinate: 'secrecy', label: 'honesty > secrecy' },
+    { dominant: 'compassion', subordinate: 'cruelty', label: 'compassion > cruelty' },
+    { dominant: 'fairness', subordinate: 'oppression', label: 'fairness > oppression' },
+    { dominant: 'courage', subordinate: 'cowardice', label: 'courage > cowardice' },
+    { dominant: 'transparency', subordinate: 'secrecy', label: 'transparency > secrecy' },
+    { dominant: 'freedom', subordinate: 'oppression', label: 'freedom > oppression' },
+  ];
+
+  try {
+    const result = await fetchCoherence(defaultPairs, embeddings);
+    if (result.per_message) {
+      coherenceScores = result.per_message;
+      renderCoherenceChart(result);
+      // Update score strip
+      const badge = document.getElementById('scoreValue');
+      if (badge && result.mean !== undefined) {
+        badge.textContent = result.mean.toFixed(2);
+      }
+    }
+  } catch (err) {
+    console.error('Coherence scoring failed:', err);
+  }
+}
+
+function renderCoherenceChart(result) {
+  const chartEl = document.getElementById('coherenceChart');
+  const summaryEl = document.getElementById('coherenceSummary');
+  const emptyEl = document.getElementById('coherenceEmpty');
+
+  if (!result.per_message || result.per_message.length === 0) return;
+  emptyEl.style.display = 'none';
+  chartEl.style.display = 'flex';
+  summaryEl.style.display = 'block';
+
+  // D3 line chart
+  chartEl.innerHTML = '';
+  const margin = { top: 20, right: 20, bottom: 30, left: 40 };
+  const width = 500 - margin.left - margin.right;
+  const height = 250 - margin.top - margin.bottom;
+
+  const svg = d3.select(chartEl).append('svg')
+    .attr('width', width + margin.left + margin.right)
+    .attr('height', height + margin.top + margin.bottom)
+    .append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+
+  const x = d3.scaleLinear().domain([0, result.per_message.length - 1]).range([0, width]);
+  const y = d3.scaleLinear().domain([0, 1]).range([height, 0]);
+
+  svg.append('g').attr('transform', `translate(0,${height})`)
+    .call(d3.axisBottom(x).ticks(Math.min(result.per_message.length, 10)).tickFormat(d => `${d}`))
+    .selectAll('text').style('fill', '#8b949e');
+  svg.append('g').call(d3.axisLeft(y).ticks(5))
+    .selectAll('text').style('fill', '#8b949e');
+  svg.selectAll('.domain, .tick line').style('stroke', '#30363d');
+
+  // Reference line at 0.5
+  svg.append('line').attr('class', 'coherence-ref-line')
+    .attr('x1', 0).attr('x2', width).attr('y1', y(0.5)).attr('y2', y(0.5));
+
+  // Line
+  const line = d3.line().x((d, i) => x(i)).y(d => y(d));
+  svg.append('path').datum(result.per_message)
+    .attr('class', 'coherence-line').attr('d', line);
+
+  // Dots
+  const violatedPositions = new Set((result.violated || []).map(v => v.position));
+  svg.selectAll('.coherence-dot').data(result.per_message).enter()
+    .append('circle')
+    .attr('class', (d, i) => 'coherence-dot' + (violatedPositions.has(i) ? ' violated' : ''))
+    .attr('cx', (d, i) => x(i)).attr('cy', d => y(d)).attr('r', 4);
+
+  // Summary card
+  let html = '<div class="coherence-summary-card">';
+  html += `<div style="display:flex;gap:24px;margin-bottom:8px;">`;
+  html += `<div><span class="metric-label">Mean</span> <span class="metric-value">${result.mean.toFixed(3)}</span></div>`;
+  html += `<div><span class="metric-label">Min</span> <span class="metric-value">${result.min.toFixed(3)}</span></div>`;
+  html += `<div><span class="metric-label">Max</span> <span class="metric-value">${result.max.toFixed(3)}</span></div>`;
+  html += '</div>';
+  if (result.violated && result.violated.length > 0) {
+    html += '<div style="margin-top:8px;font-size:12px;color:#f85149;">';
+    html += '<strong>Violated constraints:</strong><ul style="margin:4px 0;padding-left:16px;">';
+    result.violated.forEach(v => {
+      html += `<li>Position ${v.position}: ${esc(v.label)} (margin: ${v.margin.toFixed(3)})</li>`;
+    });
+    html += '</ul></div>';
+  }
+  html += '</div>';
+  summaryEl.innerHTML = html;
+}
+
+// ---- Collapse tab ----
+
+async function fetchCollapseReport() {
+  const btn = document.getElementById('btnCollapse');
+  const status = document.getElementById('collapseStatus');
+  const content = document.getElementById('collapseContent');
+  btn.disabled = true;
+  status.textContent = 'Computing...';
+
+  try {
+    const result = await fetchCollapse();
+    renderCollapseChart(result, content);
+    status.textContent = `dim_eff = ${result.dim_eff.toFixed(2)} / ${result.k}`;
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+    content.innerHTML = '<div class="empty-state"><p>Failed to compute collapse report</p></div>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderCollapseChart(result, container) {
+  container.innerHTML = '';
+
+  // Ratio display
+  const ratio = result.dim_eff_ratio;
+  const assessCls = result.assessment.replace(/\s+/g, '-');
+  let html = `<div style="text-align:center;margin-bottom:16px;">`;
+  html += `<div class="collapse-ratio">${result.dim_eff.toFixed(2)} / ${result.k}.00 = ${(ratio * 100).toFixed(0)}%</div>`;
+  html += `<span class="collapse-assessment ${assessCls}">${result.assessment}</span>`;
+  html += '</div>';
+  container.insertAdjacentHTML('beforeend', html);
+
+  // D3 bar chart of eigenvalues
+  const vizDiv = document.createElement('div');
+  vizDiv.className = 'viz-container';
+  container.appendChild(vizDiv);
+
+  const margin = { top: 10, right: 20, bottom: 30, left: 50 };
+  const width = 400 - margin.left - margin.right;
+  const height = 200 - margin.top - margin.bottom;
+
+  const svg = d3.select(vizDiv).append('svg')
+    .attr('width', width + margin.left + margin.right)
+    .attr('height', height + margin.top + margin.bottom)
+    .append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+
+  const eigenvalues = result.eigenvalues;
+  const maxEv = Math.max(...eigenvalues.map(Math.abs), 0.01);
+
+  const x = d3.scaleBand().domain(eigenvalues.map((_, i) => `λ${i}`)).range([0, width]).padding(0.3);
+  const y = d3.scaleLinear().domain([0, maxEv]).range([height, 0]);
+
+  const colorScale = d3.scaleSequential(d3.interpolateWarm).domain([0, maxEv]);
+
+  svg.append('g').attr('transform', `translate(0,${height})`)
+    .call(d3.axisBottom(x)).selectAll('text').style('fill', '#8b949e');
+  svg.append('g').call(d3.axisLeft(y).ticks(5))
+    .selectAll('text').style('fill', '#8b949e');
+  svg.selectAll('.domain, .tick line').style('stroke', '#30363d');
+
+  svg.selectAll('.collapse-bar').data(eigenvalues).enter()
+    .append('rect').attr('class', 'collapse-bar')
+    .attr('x', (d, i) => x(`λ${i}`)).attr('width', x.bandwidth())
+    .attr('y', d => y(Math.max(0, d))).attr('height', d => height - y(Math.max(0, d)))
+    .attr('fill', d => colorScale(Math.abs(d)));
+
+  // Explanation
+  container.insertAdjacentHTML('beforeend',
+    '<p class="collapse-explanation">Effective dimensionality measures how many independent value dimensions ' +
+    'the model\'s geometry actually uses. A ratio near 100% means all value directions are distinct. ' +
+    'Near 0% means they\'ve collapsed together into fewer dimensions.</p>');
+}
+
+// ---- Compare tab ----
+
+async function fetchCompareReport() {
+  const pathInput = document.getElementById('compareGotuePath');
+  const content = document.getElementById('compareContent');
+  const path = pathInput.value.trim();
+  if (!path) {
+    content.innerHTML = '<div class="empty-state"><p>Enter a .gotue file path first</p></div>';
+    return;
+  }
+
+  const btn = document.getElementById('btnCompare');
+  btn.disabled = true;
+
+  try {
+    const result = await fetchCompare(path);
+    renderCompareChart(result, content);
+  } catch (err) {
+    content.innerHTML = '<div class="empty-state"><p>Error: ' + esc(err.message || String(err)) + '</p></div>';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderCompareChart(result, container) {
+  container.innerHTML = '';
+
+  // Summary metrics
+  let html = '<div style="display:flex;gap:24px;margin-bottom:16px;">';
+  html += `<div class="manifold-metric"><span class="metric-label">Global Distance</span><span class="metric-value">${result.global_distance.toFixed(6)}</span></div>`;
+  if (result.probe_projected_distance !== null) {
+    html += `<div class="manifold-metric"><span class="metric-label">Probe-Projected</span><span class="metric-value">${result.probe_projected_distance.toFixed(6)}</span></div>`;
+  }
+  if (result.ratio !== null) {
+    const ratioStr = result.ratio.toFixed(1) + 'x';
+    const marker = result.ratio > 2.0 ? ' (value change exceeds global)' : '';
+    html += `<div class="manifold-metric"><span class="metric-label">Ratio</span><span class="metric-value" style="color:${result.ratio > 2 ? '#f85149' : '#c9d1d9'}">${ratioStr}${marker}</span></div>`;
+  }
+  html += '</div>';
+  container.insertAdjacentHTML('beforeend', html);
+
+  if (!result.per_probe || result.per_probe.length === 0) return;
+
+  // D3 horizontal bar chart of per-probe distances
+  const vizDiv = document.createElement('div');
+  vizDiv.className = 'viz-container';
+  container.appendChild(vizDiv);
+
+  const sorted = [...result.per_probe].sort((a, b) => b.distance - a.distance);
+  const margin = { top: 10, right: 20, bottom: 10, left: 100 };
+  const barH = 24;
+  const width = 400 - margin.left - margin.right;
+  const height = sorted.length * barH;
+
+  const svg = d3.select(vizDiv).append('svg')
+    .attr('width', width + margin.left + margin.right)
+    .attr('height', height + margin.top + margin.bottom)
+    .append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+
+  const x = d3.scaleLinear().domain([0, Math.max(...sorted.map(d => d.distance), 0.01)]).range([0, width]);
+  const y = d3.scaleBand().domain(sorted.map(d => d.label)).range([0, height]).padding(0.2);
+
+  svg.selectAll('.compare-bar').data(sorted).enter()
+    .append('rect')
+    .attr('x', 0).attr('y', d => y(d.label)).attr('width', d => x(d.distance)).attr('height', y.bandwidth())
+    .attr('fill', '#f78166').attr('rx', 3);
+
+  svg.selectAll('.compare-label').data(sorted).enter()
+    .append('text')
+    .attr('x', -8).attr('y', d => y(d.label) + y.bandwidth() / 2)
+    .attr('text-anchor', 'end').attr('dominant-baseline', 'middle')
+    .style('fill', '#c9d1d9').style('font-size', '12px')
+    .text(d => d.label);
+
+  svg.selectAll('.compare-val').data(sorted).enter()
+    .append('text')
+    .attr('x', d => x(d.distance) + 6).attr('y', d => y(d.label) + y.bandwidth() / 2)
+    .attr('dominant-baseline', 'middle')
+    .style('fill', '#8b949e').style('font-size', '11px').style('font-family', 'monospace')
+    .text(d => d.distance.toFixed(4));
+}
+
 // ---- Init ----
 
 export function init() {
@@ -688,6 +952,12 @@ export function init() {
 
   // Manifold computation
   document.getElementById('btnManifold').addEventListener('click', fetchManifold);
+
+  // Collapse computation
+  document.getElementById('btnCollapse').addEventListener('click', fetchCollapseReport);
+
+  // Compare computation
+  document.getElementById('btnCompare').addEventListener('click', fetchCompareReport);
 
   // Navigation
   btnPrev.addEventListener('click', () => {

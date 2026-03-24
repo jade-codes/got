@@ -98,14 +98,26 @@
   <!-- Analysis panel: all tabs unified -->
   <div class="analysis-panel">
     <div class="tab-bar">
-      <button class="tab-btn active" data-tab="values">Values</button>
-      <button class="tab-btn" data-tab="deviation">Deviation</button>
-      <button class="tab-btn" data-tab="contradictions">Contradictions</button>
-      <button class="tab-btn" data-tab="redundancies">Redundancies</button>
-      <button class="tab-btn" data-tab="chord">Chord</button>
-      <button class="tab-btn" data-tab="heatmap">Heatmap</button>
-      <button class="tab-btn" data-tab="sphere">Sphere</button>
-      <button class="tab-btn" data-tab="manifold">Manifold</button>
+      <div class="tab-group">
+        <span class="tab-group-label">Live</span>
+        <button class="tab-btn active" data-tab="values">Values</button>
+        <button class="tab-btn" data-tab="deviation">Deviation</button>
+        <button class="tab-btn" data-tab="coherence">Coherence</button>
+      </div>
+      <div class="tab-group">
+        <span class="tab-group-label">Pairwise</span>
+        <button class="tab-btn" data-tab="contradictions">Contradictions</button>
+        <button class="tab-btn" data-tab="redundancies">Redundancies</button>
+        <button class="tab-btn" data-tab="chord">Chord</button>
+        <button class="tab-btn" data-tab="heatmap">Heatmap</button>
+      </div>
+      <div class="tab-group">
+        <span class="tab-group-label">Geometry</span>
+        <button class="tab-btn" data-tab="sphere">Sphere</button>
+        <button class="tab-btn" data-tab="manifold">Manifold</button>
+        <button class="tab-btn" data-tab="collapse">Collapse</button>
+        <button class="tab-btn" data-tab="compare">Compare</button>
+      </div>
     </div>
     <div class="tab-panel active" id="tab-values">
       <div class="empty-state"><p>No values detected yet</p></div>
@@ -134,6 +146,25 @@
         <span id="manifoldStatus" class="manifold-status">Need 5+ observations</span>
       </div>
       <div id="manifoldContent" class="empty-state"><p>Send messages to accumulate activations, then compute manifold geometry</p></div>
+    </div>
+    <div class="tab-panel" id="tab-coherence">
+      <div class="empty-state" id="coherenceEmpty"><p>Send messages to begin coherence scoring</p></div>
+      <div id="coherenceChart" class="viz-container" style="display:none"></div>
+      <div id="coherenceSummary" style="display:none"></div>
+    </div>
+    <div class="tab-panel" id="tab-collapse">
+      <div class="manifold-header">
+        <button id="btnCollapse" class="snapshot-btn">Compute Collapse</button>
+        <span id="collapseStatus" class="manifold-status">Click to analyse value dimensionality</span>
+      </div>
+      <div id="collapseContent" class="empty-state"><p>Computes how many independent value dimensions the model's geometry uses</p></div>
+    </div>
+    <div class="tab-panel" id="tab-compare">
+      <div class="manifold-header">
+        <input type="text" id="compareGotuePath" placeholder="Path to second .gotue file" style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;font-size:13px;">
+        <button id="btnCompare" class="snapshot-btn">Compare</button>
+      </div>
+      <div id="compareContent" class="empty-state"><p>Enter the path to a second model's .gotue file to compare value geometry</p></div>
     </div>
   </div>
 </div>
