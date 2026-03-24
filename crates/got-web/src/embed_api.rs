@@ -116,7 +116,7 @@ pub async fn embed_text(
 }
 
 /// Call the activation server sidecar to get a real hidden state.
-async fn embed_via_activation_server(text: &str, url: &str) -> Result<EmbedResponse, String> {
+pub async fn embed_via_activation_server(text: &str, url: &str) -> Result<EmbedResponse, String> {
     let client = reqwest::Client::new();
     let body = serde_json::json!({ "text": text });
 

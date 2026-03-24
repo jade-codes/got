@@ -31,6 +31,10 @@ PORT = 8100
 URL = f"http://localhost:{PORT}"
 
 def start_server(layer):
+    # Kill ANY existing activation server on this port
+    subprocess.run(["pkill", "-f", "activation_server"], capture_output=True)
+    time.sleep(3)  # wait for port to free
+
     proc = subprocess.Popen(
         [sys.executable, "scripts/activation_server.py",
          "--model", MODEL, "--layer", str(layer),
@@ -42,14 +46,21 @@ def start_server(layer):
         try:
             r = requests.get(f"{URL}/health", timeout=2)
             if r.ok:
-                return proc
+                data = r.json()
+                # Verify it's actually the right layer
+                if data.get("layer") == layer:
+                    return proc
         except:
             pass
     return proc
 
 def stop_server(proc):
     proc.terminate()
-    proc.wait(timeout=10)
+    try:
+        proc.wait(timeout=10)
+    except:
+        proc.kill()
+    time.sleep(2)  # wait for port to free
 
 def measure(layer):
     embs = {}

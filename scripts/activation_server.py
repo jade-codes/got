@@ -81,13 +81,15 @@ class ActivationModel:
         self.layers = self._detect_layers()
         print(f"  Architecture: {type(self.model).__name__}, {len(self.layers)} layers detected")
 
-        # Hook state
-        self._captured: Optional[torch.Tensor] = None
+        # Hook state: captured[layer_idx] = last-token hidden state
+        self._captured: dict[int, torch.Tensor] = {}
         self._lock = threading.Lock()
 
-        # Register persistent hook on target layer
-        self._hook = self.layers[self.target_layer].register_forward_hook(self._capture_hook)
-        print(f"  Hook registered on layer {self.target_layer}")
+        # Register hooks on ALL layers
+        self._hooks = []
+        for i, layer_module in enumerate(self.layers):
+            self._hooks.append(layer_module.register_forward_hook(self._make_hook(i)))
+        print(f"  Hooks registered on all {len(self.layers)} layers")
 
     def _detect_layers(self) -> list:
         if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
@@ -99,19 +101,46 @@ class ActivationModel:
         else:
             raise ValueError(f"Unknown architecture: {type(self.model).__name__}")
 
-    def _capture_hook(self, module, input, output):
-        if isinstance(output, tuple):
-            hidden = output[0]
-        else:
-            hidden = output
-        # Last token position — carries the contextualized meaning of the full input.
-        # Mean-pooling washes out value-specific signal (all descriptions look the same).
-        self._captured = hidden[0][-1].detach().float().cpu()
+    def _make_hook(self, layer_idx: int):
+        def hook_fn(module, input, output):
+            if isinstance(output, tuple):
+                hidden = output[0]
+            else:
+                hidden = output
+            # Last token position — carries the contextualized meaning of the full input.
+            self._captured[layer_idx] = hidden[0][-1].detach().float().cpu()
+        return hook_fn
 
-    def get_hidden_state(self, text: str) -> tuple[List[float], int]:
-        """Run text through the model and return the captured hidden state.
+    def get_hidden_state(self, text: str, layer: Optional[int] = None) -> tuple[List[float], int, int]:
+        """Run text through the model and return the hidden state at the specified layer.
 
-        Returns (hidden_state_list, n_tokens).
+        Returns (hidden_state_list, n_tokens, actual_layer).
+        """
+        if layer is None:
+            layer = self.target_layer
+
+        with self._lock:
+            inputs = self.tokenizer(
+                text, return_tensors="pt", truncation=True, max_length=512,
+            )
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+            n_tokens = inputs["input_ids"].shape[1]
+
+            self._captured.clear()
+            with torch.no_grad():
+                self.model(**inputs)
+
+            if layer not in self._captured:
+                raise RuntimeError(f"Hook for layer {layer} did not fire")
+
+            result = self._captured[layer].tolist()
+            self._captured.clear()
+            return result, n_tokens, layer
+
+    def get_all_layers(self, text: str) -> tuple[dict[int, List[float]], int]:
+        """Run text and return hidden states from ALL layers.
+
+        Returns (layer_idx -> hidden_state_list, n_tokens).
         """
         with self._lock:
             inputs = self.tokenizer(
@@ -120,14 +149,12 @@ class ActivationModel:
             inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
             n_tokens = inputs["input_ids"].shape[1]
 
+            self._captured.clear()
             with torch.no_grad():
                 self.model(**inputs)
 
-            if self._captured is None:
-                raise RuntimeError("Hook did not fire")
-
-            result = self._captured.tolist()
-            self._captured = None
+            result = {k: v.tolist() for k, v in self._captured.items()}
+            self._captured.clear()
             return result, n_tokens
 
 
@@ -156,13 +183,33 @@ async def hidden_states(req: HiddenStateRequest) -> HiddenStateResponse:
     if _model is None:
         raise RuntimeError("Model not loaded")
 
-    hs, n_tokens = _model.get_hidden_state(req.text)
+    layer = req.layer if req.layer is not None else _model.target_layer
+    hs, n_tokens, actual_layer = _model.get_hidden_state(req.text, layer=layer)
     return HiddenStateResponse(
         hidden_state=hs,
-        layer=_model.target_layer,
+        layer=actual_layer,
         n_tokens=n_tokens,
         hidden_dim=_model.hidden_dim,
     )
+
+
+class AllLayersRequest(BaseModel):
+    text: str
+
+
+@app.post("/all_layers")
+async def all_layers(req: AllLayersRequest):
+    """Return hidden states from ALL layers in a single forward pass."""
+    if _model is None:
+        raise RuntimeError("Model not loaded")
+
+    layers_data, n_tokens = _model.get_all_layers(req.text)
+    return {
+        "layers": {str(k): v for k, v in layers_data.items()},
+        "n_tokens": n_tokens,
+        "n_layers": _model.n_layers,
+        "hidden_dim": _model.hidden_dim,
+    }
 
 
 class ChatCompletionRequest(BaseModel):

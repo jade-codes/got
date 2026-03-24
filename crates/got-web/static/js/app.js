@@ -8,7 +8,8 @@
 
 import { fetchDemoConversation, analyseConversation, embedText,
          createProxySession, proxyObserve, proxyManifold, proxySnapshot,
-         chatWithModel, fetchCoherence, fetchCollapse, fetchCompare } from './api.js';
+         chatWithModel, fetchCoherence, fetchCollapse, fetchCompare,
+         attestRead, attestSign, attestStatus } from './api.js';
 import { scoreColour, trustColour } from './shared/colors.js';
 import { esc, getTermList, findPair } from './shared/utils.js';
 import { renderTimeline, updateTimelineHighlight } from './analyse/timeline.js';
@@ -30,6 +31,8 @@ let attestations = [];
 let allMessages = [];         // accumulated messages [{speaker, text, embedding}]
 let speakerMap = {};
 let latestSnapshot = null;    // most recent snapshot response (manifold data)
+let probesAvailable = false;  // true if attestation probes are loaded
+let lastAttestResult = null;  // most recent attestation signing result
 
 // ---- LLM settings ----
 let llmProvider, llmApiKey, llmModel, llmBaseUrl;
@@ -148,7 +151,19 @@ async function handleSend() {
         deviationHistory.push(obsResult.deviation);
       }
       updateDeviationDisplay(obsResult.deviation || null);
-      updateTopValues(obsResult.detected_values);
+
+      // Try attestation probe readings (if probes loaded)
+      if (probesAvailable) {
+        try {
+          const probeResult = await attestRead(aiText);
+          updateTopValuesFromProbes(probeResult.readings);
+        } catch (e) {
+          console.warn('Probe reading failed, using proxy values:', e);
+          updateTopValues(obsResult.detected_values);
+        }
+      } else {
+        updateTopValues(obsResult.detected_values);
+      }
 
     } else {
       // No LLM configured — user message already observed above as "user"
@@ -638,6 +653,55 @@ function manifoldMetric(label, value, detail) {
     '</div>';
 }
 
+// ---- Attestation probe values ----
+
+function updateTopValuesFromProbes(readings) {
+  const panel = document.getElementById('tab-values');
+  if (!readings || readings.length === 0) {
+    panel.innerHTML = '<div class="empty-state"><p>No probe readings</p></div>';
+    return;
+  }
+
+  const sorted = [...readings].sort((a, b) => b.confidence - a.confidence);
+  let html = '<div style="margin-bottom:8px;font-size:11px;color:#58a6ff;font-weight:600;">PROBE READINGS (attestation pipeline)</div>';
+  html += '<ul class="top-values-list">';
+  sorted.forEach(r => {
+    const pct = Math.min(100, r.confidence * 100);
+    const flagged = r.coverage_flag ? ' (LOW CONFIDENCE)' : '';
+    const col = r.coverage_flag ? '#f85149' : r.confidence > 0.7 ? '#3fb950' : r.confidence > 0.4 ? '#d29922' : '#8b949e';
+    html += '<li><span class="term-name">' + esc(r.dimension) + flagged + '</span>' +
+      '<span class="term-score" style="color:' + col + '">' + r.confidence.toFixed(3) + '</span>' +
+      '<span class="term-bar"><span class="term-bar-fill" style="width:' + pct + '%;background:' + col + '"></span></span></li>';
+  });
+  html += '</ul>';
+
+  // Attestation signing button
+  html += '<div style="margin-top:12px;padding-top:12px;border-top:1px solid #21262d;">';
+  html += '<button id="btnSignAttest" class="snapshot-btn" style="margin-right:8px;">Sign Attestation</button>';
+  html += '<span id="attestResult" style="font-size:12px;color:#8b949e;"></span>';
+  html += '</div>';
+
+  panel.innerHTML = html;
+
+  // Wire sign button
+  document.getElementById('btnSignAttest')?.addEventListener('click', async () => {
+    const btn = document.getElementById('btnSignAttest');
+    const result = document.getElementById('attestResult');
+    btn.disabled = true;
+    result.textContent = 'Signing...';
+    try {
+      const res = await attestSign();
+      lastAttestResult = res;
+      result.innerHTML = '<span style="color:#3fb950;">Signed</span> ' +
+        res.attestation_hash.substring(0, 16) + '... ' +
+        '(' + res.readings_count + ' readings, seq #' + res.observation_count + ')';
+    } catch (e) {
+      result.innerHTML = '<span style="color:#f85149;">Error: ' + esc(e.message) + '</span>';
+    }
+    btn.disabled = false;
+  });
+}
+
 // ---- Coherence tab ----
 
 let coherenceScores = []; // per-message C(h) scores
@@ -952,6 +1016,16 @@ export function init() {
 
   // Manifold computation
   document.getElementById('btnManifold').addEventListener('click', fetchManifold);
+
+  // Check attestation probe availability
+  attestStatus().then(s => {
+    probesAvailable = s.probes_loaded;
+    if (s.probes_loaded) {
+      console.log(`Attestation probes loaded: ${s.probe_count} probes at layer ${s.probe_layer}`);
+      document.getElementById('sessionInfo').textContent =
+        `Probes: ${s.probe_count} dims @ layer ${s.probe_layer}`;
+    }
+  }).catch(() => {});
 
   // Collapse computation
   document.getElementById('btnCollapse').addEventListener('click', fetchCollapseReport);

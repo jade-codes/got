@@ -31,6 +31,7 @@ use got_incoherence::coherence::CoherenceConfig;
 use got_incoherence::embeddings::PrecomputedEmbeddings;
 use got_web::AppState;
 use got_web::VocabLookup;
+use got_web::attestation_api::AttestationState;
 use got_web::proxy_api::ProxyState;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -72,6 +73,11 @@ struct Args {
     /// Example: http://localhost:8100
     #[arg(long)]
     activation_server: Option<String>,
+
+    /// Path to pre-trained probe set JSON (enables attestation pipeline).
+    /// Train probes with: got-cli train --activations ... --unembedding ... --layer 8
+    #[arg(long)]
+    probes: Option<String>,
 
     /// Run in synthetic demo mode (compiled-in 32-d embeddings).
     /// For deployment/development without a reference model.
@@ -160,6 +166,10 @@ fn build_synthetic_state() -> AppState {
         proxy: ProxyState::new(),
         vocab_lookup: None,
         activation_server_url: None,
+        probe_set: None,
+        signing_key: None,
+        verifying_key_hex: None,
+        attestation_state: None,
     }
 }
 
@@ -458,7 +468,27 @@ async fn build_state(args: &Args) -> AppState {
         proxy: ProxyState::new(),
         vocab_lookup: Some(vocab_lookup),
         activation_server_url: args.activation_server.clone(),
+        probe_set: {
+            if let Some(ref probes_path) = args.probes {
+                eprintln!("Loading probes from {probes_path}...");
+                let json = std::fs::read_to_string(probes_path)
+                    .unwrap_or_else(|e| panic!("failed to read {probes_path}: {e}"));
+                let ps: got_probe::ProbeSet = serde_json::from_str(&json)
+                    .unwrap_or_else(|e| panic!("failed to parse probes: {e}"));
+                eprintln!("  {} probes for layer {}", ps.probes.len(), ps.layer);
+                Some(ps)
+            } else {
+                None
+            }
+        },
+        signing_key: None, // set below
+        verifying_key_hex: None, // set below
+        attestation_state: Some(tokio::sync::Mutex::new(AttestationState::new())),
     }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[tokio::main]
@@ -474,8 +504,17 @@ async fn main() {
         std::process::exit(1);
     };
 
-    eprintln!("Mode: {} | hidden_dim: {} | terms: {}",
-        state.mode, state.hidden_dim, state.available_terms.len());
+    // Generate signing key for attestations
+    let mut state = state;
+    let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+    let vk_hex = hex_encode(sk.verifying_key().as_bytes());
+    state.signing_key = Some(sk);
+    state.verifying_key_hex = Some(vk_hex.clone());
+
+    eprintln!("Mode: {} | hidden_dim: {} | terms: {} | probes: {}",
+        state.mode, state.hidden_dim, state.available_terms.len(),
+        state.probe_set.as_ref().map(|p| p.probes.len()).unwrap_or(0));
+    eprintln!("  Attestation public key: {}", vk_hex);
 
     let state = Arc::new(state);
 
@@ -505,6 +544,11 @@ async fn main() {
         .route("/api/coherence", post(got_web::metrics_api::coherence))
         .route("/api/collapse", post(got_web::metrics_api::collapse))
         .route("/api/compare", post(got_web::metrics_api::compare))
+        // Attestation endpoints (real probe pipeline)
+        .route("/api/attest/read", post(got_web::attestation_api::attest_read))
+        .route("/api/attest/sign", post(got_web::attestation_api::attest_sign))
+        .route("/api/attest/verify", post(got_web::attestation_api::attest_verify))
+        .route("/api/attest/status", get(got_web::attestation_api::attest_status))
         // Proxy endpoints
         .route("/api/proxy/session", post(got_web::proxy_api::create_session))
         .route("/api/proxy/session/:id/observe", post(got_web::proxy_api::observe))

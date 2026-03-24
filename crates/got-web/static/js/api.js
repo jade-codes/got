@@ -105,6 +105,43 @@ export async function fetchCompare(comparisonGotuePath, probeTerms = []) {
   return res.json();
 }
 
+// Attestation pipeline
+export async function attestRead(text) {
+  const res = await fetch('/api/attest/read', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function attestSign(modelId) {
+  const res = await fetch('/api/attest/sign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model_id: modelId }),
+  });
+  return res.json();
+}
+
+export async function attestVerify(attestationJson, publicKeyHex) {
+  const res = await fetch('/api/attest/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ attestation_json: attestationJson, public_key_hex: publicKeyHex }),
+  });
+  return res.json();
+}
+
+export async function attestStatus() {
+  const res = await fetch('/api/attest/status');
+  return res.json();
+}
+
 export async function proxySnapshot(sessionId, attestationType) {
   const body = {};
   if (attestationType) body.attestation_type = attestationType;

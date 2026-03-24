@@ -1,4 +1,5 @@
 pub mod api;
+pub mod attestation_api;
 pub mod chat_api;
 pub mod demo;
 pub mod embed_api;
@@ -7,9 +8,12 @@ pub mod proxy_api;
 
 use std::collections::HashMap;
 
+use ed25519_dalek::SigningKey;
 use got_core::geometry::CausalGeometry;
 use got_incoherence::coherence::CoherenceConfig;
 use got_incoherence::embeddings::EmbeddingSource;
+use got_probe::ProbeSet;
+use tokio::sync::Mutex;
 
 /// Full-vocabulary lookup that reads embedding rows on demand from the .gotue bytes.
 pub struct VocabLookup {
@@ -61,4 +65,12 @@ pub struct AppState {
     /// URL of the activation server for intermediate-layer hidden states.
     /// When set, /api/embed routes through the sidecar instead of bag-of-words.
     pub activation_server_url: Option<String>,
+    /// Pre-trained probe set for real geometric attestation.
+    pub probe_set: Option<ProbeSet>,
+    /// Ed25519 signing key for attestations (generated at startup).
+    pub signing_key: Option<SigningKey>,
+    /// Hex-encoded public key for verification.
+    pub verifying_key_hex: Option<String>,
+    /// Accumulated attestation state (readings, chaining).
+    pub attestation_state: Option<Mutex<attestation_api::AttestationState>>,
 }
