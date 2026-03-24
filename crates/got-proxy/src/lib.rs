@@ -1,10 +1,11 @@
 // ---------------------------------------------------------------------------
 // got-proxy: Proxy architecture for closed-source model value monitoring.
 //
-// Uses a known open-source reference model's geometry (Φ = U^T U) as the
-// measurement instrument. Closed-source model outputs are embedded through
-// this reference geometry, building an evolving behavioral value profile
-// with statistical deviation detection and cryptographic attestation.
+// Builds its own behavioral value space by embedding model outputs and
+// value anchors through the same embedding model (e.g. Ollama), ensuring
+// consistent measurement within a single embedding space. Uses absolute
+// cosine similarity for value detection and Welford online statistics
+// with EWMA recency weighting for drift detection.
 //
 // Trust tier: "Tier 0 — Behavioral" (weaker than geometric attestations,
 // which have direct access to model internals).

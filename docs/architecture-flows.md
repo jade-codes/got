@@ -403,9 +403,25 @@ Content-addressed storage (`StoreId` = SHA-256 of canonical bytes).
 ### 8. Proxy Pipeline (Closed-Source Model Monitoring)
 
 For models where internals are inaccessible (GPT-4, Claude, Gemini).
-Uses a reference model's geometry as the measurement instrument.
+The proxy builds its own behavioral value space by embedding model outputs
+and value anchors through the same embedding model, ensuring consistent
+measurement within a single embedding space.
+
+**Session creation** embeds all value terms through the configured embedding
+model (e.g. Ollama's nomic-embed-text), creating anchors in that space.
+The proxy uses Φ = I (standard cosine) since it operates in the embedding
+model's space, not a reference model's causal geometry.
 
 ```
+  POST /api/proxy/session
+       |
+       ├── embedding_url + embedding_model configured
+       ├── For each value term:
+       │     POST {embedding_url}/api/embeddings → anchor vector
+       ├── Build PrecomputedEmbeddings from anchors
+       ├── Φ = I (identity — plain cosine in embedding space)
+       └── Return { session_id, geometry_hash }
+
   User types message in browser
        |
        v
@@ -414,24 +430,24 @@ Uses a reference model's geometry as the measurement instrument.
        |  <──── AI response text ─────┘
        |
        v
-  POST /api/embed
-       text → tokenize → lookup in reference vocabulary
-       → average matched embeddings → [f32; dim]
+  POST /api/proxy/session/:id/observe  { text: "...", speaker: "assistant" }
        |
-       v
-  POST /api/proxy/session/:id/observe
-       |
-       ├── causal_cosine(embedding, term_emb, Φ) for each of 28 terms
-       ├── z-score → detected values (top N above threshold)
+       ├── Embed text via same embedding model:
+       │     POST {embedding_url}/api/embeddings → [f32; dim]
+       │
+       ├── cosine(embedding, term_emb) for each value term
+       ├── Detected values: terms with cosine > threshold (default 0.3)
+       ├── ALL scores recorded for baseline tracking
        ├── Welford update: TermProfile.update(score, α)
        ├── EWMA update for recency weighting
-       ├── pairwise causal cosines → PairwiseBaseline.update()
+       ├── pairwise cosines → PairwiseBaseline.update()
        |
-       ├── IF observation_count ≥ 20 (baseline sufficient):
-       │     Signal 1: fraction of terms with |z-score| > 2.5σ from baseline
+       ├── IF observation_count ≥ min_observations (baseline sufficient):
+       │     Signal 1: fraction of terms with |z-score from baseline| > 2.5σ
        │     Signal 2: 1 − cosine(current_EWMA_profile, baseline_profile)
        │     Signal 3: fraction of pairs shifted > 2.5σ from baseline
-       │     Combined: 0.4×S1 + 0.3×S2 + 0.3×S3
+       │     Signal 4: manifold density (off-manifold detection, optional)
+       │     Combined: w1×S1 + w2×S2 + w3×S3 + w4×S4
        │     → WithinBaseline (<0.3) | Drifting (0.3–0.6) | Deviated (≥0.6)
        │
        └── Return { detected_values, deviation }
@@ -444,6 +460,12 @@ Uses a reference model's geometry as the measurement instrument.
        ├── Ed25519 sign → signature
        └── Chain: parent_hash = previous attestation hash
 ```
+
+**Value Taxonomy**: Value terms can be configured via a TOML file (`--values`).
+Each entry has a `name`, `description`, and optional `cluster`/`antonyms`.
+In reference model mode, descriptions are embedded by averaging token vectors
+from the unembedding matrix. In proxy mode with an external embedding model,
+term names are embedded through the same API used for observations.
 
 ---
 

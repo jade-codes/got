@@ -33,17 +33,61 @@ use crate::AppState;
 // Types
 // ---------------------------------------------------------------------------
 
+/// Per-session embedding config for calling the external embedding model.
+#[derive(Debug, Clone)]
+pub struct SessionEmbeddingConfig {
+    pub url: String,
+    pub model: String,
+}
+
 /// Shared proxy state: sessions keyed by session ID.
 pub struct ProxyState {
     pub sessions: Mutex<HashMap<String, ProxySession<MemoryValueSpaceStore, PrecomputedEmbeddings>>>,
+    /// Per-session embedding config (for text → embedding conversion).
+    pub embedding_configs: Mutex<HashMap<String, SessionEmbeddingConfig>>,
 }
 
 impl ProxyState {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            embedding_configs: Mutex::new(HashMap::new()),
         }
     }
+}
+
+/// Embed text via an Ollama-compatible /api/embeddings endpoint.
+async fn embed_text_via_api(text: &str, config: &SessionEmbeddingConfig) -> Result<Vec<f32>, String> {
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": config.model,
+        "prompt": text,
+    });
+
+    let resp = client
+        .post(format!("{}/api/embeddings", config.url))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("embedding request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("embedding HTTP {status}: {text}"));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("parse embedding response: {e}"))?;
+
+    json["embedding"]
+        .as_array()
+        .ok_or_else(|| "no embedding array in response".to_string())?
+        .iter()
+        .map(|v| v.as_f64().map(|f| f as f32).ok_or_else(|| "non-numeric embedding value".to_string()))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +98,11 @@ impl ProxyState {
 pub struct CreateSessionRequest {
     pub session_id: Option<String>,
     pub target_model_id: String,
+    /// Ollama-compatible embedding endpoint URL (e.g. "http://localhost:11434").
+    /// When provided, the proxy embeds text internally for observe() calls.
+    pub embedding_url: Option<String>,
+    /// Embedding model name (e.g. "nomic-embed-text"). Required with embedding_url.
+    pub embedding_model: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,7 +114,8 @@ pub struct CreateSessionResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct ObserveRequest {
-    pub embedding: Vec<f32>,
+    /// The text to observe. The proxy embeds this via the session's embedding endpoint.
+    pub text: String,
     /// Speaker ID: "assistant" for the model, "user" for the human.
     /// Defaults to "assistant" if omitted (backward compatible).
     #[serde(default = "default_speaker")]
@@ -203,16 +253,6 @@ fn proxy_err(
     (status, Json(ProxyErrorResponse { error: msg.into() }))
 }
 
-/// Reconstruct a CausalGeometry from raw gram data.
-fn clone_geometry(
-    geometry: &got_core::geometry::CausalGeometry,
-    dim: usize,
-) -> got_core::geometry::CausalGeometry {
-    let gram = geometry.gram().to_vec();
-    got_core::geometry::CausalGeometry::from_raw_gram(gram, dim)
-        .expect("geometry clone should succeed")
-}
-
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -228,14 +268,58 @@ pub async fn create_session(
 
     let sk = SigningKey::generate(&mut rand::thread_rng());
 
-    let source = PrecomputedEmbeddings::new(state.term_embeddings.clone())
-        .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding source: {e}")))?;
+    // Determine embedding source: external API or reference model fallback.
+    let (source, embedding_config, hidden_dim) =
+        if let (Some(ref url), Some(ref model)) = (&req.embedding_url, &req.embedding_model) {
+            let emb_config = SessionEmbeddingConfig {
+                url: url.clone(),
+                model: model.clone(),
+            };
+
+            // Embed all value term names (or descriptions from state) via the embedding API.
+            let mut term_embeddings = HashMap::new();
+            for term in &state.available_terms {
+                match embed_text_via_api(term, &emb_config).await {
+                    Ok(emb) => { term_embeddings.insert(term.clone(), emb); }
+                    Err(e) => {
+                        eprintln!("  warning: failed to embed term '{}': {e}", term);
+                    }
+                }
+            }
+
+            if term_embeddings.is_empty() {
+                return Err(proxy_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "no value terms could be embedded via the embedding API",
+                ));
+            }
+
+            let dim = term_embeddings.values().next().unwrap().len();
+            let source = PrecomputedEmbeddings::new(term_embeddings)
+                .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding source: {e}")))?;
+
+            (source, Some(emb_config), dim)
+        } else {
+            // Fallback: use reference model embeddings from AppState.
+            let source = PrecomputedEmbeddings::new(state.term_embeddings.clone())
+                .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding source: {e}")))?;
+
+            (source, None, state.hidden_dim)
+        };
+
+    // Build Φ = I for the embedding space.
+    let mut identity = vec![0.0f32; hidden_dim * hidden_dim];
+    for i in 0..hidden_dim {
+        identity[i * hidden_dim + i] = 1.0;
+    }
+    let geometry = got_core::geometry::CausalGeometry::from_raw_gram(identity, hidden_dim)
+        .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("geometry: {e}")))?;
 
     let session = ProxySession::new(
         session_id.clone(),
         req.target_model_id.clone(),
         sk,
-        clone_geometry(&state.geometry, state.hidden_dim),
+        geometry,
         source,
         ProxyConfig::default(),
         MemoryValueSpaceStore::new(),
@@ -251,6 +335,16 @@ pub async fn create_session(
         .await
         .insert(session_id.clone(), session);
 
+    // Store embedding config if provided.
+    if let Some(config) = embedding_config {
+        state
+            .proxy
+            .embedding_configs
+            .lock()
+            .await
+            .insert(session_id.clone(), config);
+    }
+
     Ok(Json(CreateSessionResponse {
         session_id,
         target_model_id: req.target_model_id,
@@ -264,13 +358,44 @@ pub async fn observe(
     Path(session_id): Path<String>,
     Json(req): Json<ObserveRequest>,
 ) -> Result<Json<ObserveResponse>, (StatusCode, Json<ProxyErrorResponse>)> {
+    // Embed the text via the session's embedding endpoint.
+    let embedding = {
+        let configs = state.proxy.embedding_configs.lock().await;
+        if let Some(config) = configs.get(&session_id) {
+            embed_text_via_api(&req.text, config)
+                .await
+                .map_err(|e| proxy_err(StatusCode::BAD_GATEWAY, format!("embed: {e}")))?
+        } else {
+            // Fallback: average reference model token embeddings (legacy path).
+            let dim = state.hidden_dim;
+            let mut sum = vec![0.0f32; dim];
+            let mut matched = 0usize;
+            for token in req.text.split_whitespace() {
+                let clean: String = token.to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
+                    .collect();
+                if clean.is_empty() { continue; }
+                if let Some(emb) = state.embedding_source.embed(&clean) {
+                    for (s, e) in sum.iter_mut().zip(emb.iter()) { *s += e; }
+                    matched += 1;
+                }
+            }
+            if matched > 0 {
+                let scale = 1.0 / matched as f32;
+                for s in sum.iter_mut() { *s *= scale; }
+            }
+            sum
+        }
+    };
+
     let mut sessions = state.proxy.sessions.lock().await;
     let session = sessions
         .get_mut(&session_id)
         .ok_or_else(|| proxy_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
 
     let result = session
-        .observe(&req.embedding, &req.speaker)
+        .observe(&embedding, &req.speaker)
         .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("observe: {e}")))?;
 
     Ok(Json(ObserveResponse {

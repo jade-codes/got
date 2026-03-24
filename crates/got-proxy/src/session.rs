@@ -198,7 +198,11 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
         }
     }
 
-    /// Detect values in an embedding: project against all terms, z-score, threshold.
+    /// Detect values in an embedding using absolute cosine similarity.
+    ///
+    /// For each value term, computes cosine similarity against the observation
+    /// embedding. All scores are recorded (for baseline tracking); terms above
+    /// the detection threshold are flagged as "detected."
     fn detect_values(&self, embedding: &[f32]) -> (Vec<DetectedValue>, HashMap<String, f64>) {
         let mut detected = Vec::new();
         let mut scores = HashMap::new();
@@ -213,41 +217,19 @@ impl<S: ValueSpaceStore, E: EmbeddingSource> ProxySession<S, E> {
             }
         }
 
-        if !raw_scores.is_empty() {
-            let mean: f64 =
-                raw_scores.iter().map(|(_, s)| s).sum::<f64>() / raw_scores.len() as f64;
-            let variance: f64 = raw_scores
-                .iter()
-                .map(|(_, s)| (s - mean).powi(2))
-                .sum::<f64>()
-                / raw_scores.len() as f64;
-            let stddev = variance.sqrt();
+        // Record all scores for baseline tracking, detect those above threshold.
+        raw_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-            let mut z_scored: Vec<(String, f64)> = if stddev > f64::EPSILON {
-                raw_scores
-                    .iter()
-                    .map(|(t, s)| (t.clone(), (s - mean) / stddev))
-                    .collect()
-            } else {
-                raw_scores
-                    .iter()
-                    .map(|(t, _)| (t.clone(), 0.0))
-                    .collect()
-            };
-
-            z_scored
-                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            for (term, zscore) in z_scored
-                .into_iter()
-                .filter(|(_, z)| *z > self.config.value_detection_threshold as f64)
-                .take(self.config.max_values_per_observation)
-            {
+        for (term, cosine) in raw_scores
+            .into_iter()
+            .take(self.config.max_values_per_observation)
+        {
+            scores.insert(term.clone(), cosine);
+            if cosine > self.config.value_detection_threshold as f64 {
                 detected.push(DetectedValue {
-                    term: term.clone(),
-                    score: zscore,
+                    term,
+                    score: cosine,
                 });
-                scores.insert(term, zscore);
             }
         }
 

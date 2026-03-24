@@ -38,7 +38,7 @@ pub struct ProxyConfig {
     pub min_observations_for_detection: u64,
 
     // --- Value detection ---
-    /// Minimum z-score for a value term to be "detected" in a message.
+    /// Minimum cosine similarity for a value term to be "detected" in a message.
     pub value_detection_threshold: f32,
     /// Maximum number of value terms to detect per observation.
     pub max_values_per_observation: usize,
@@ -75,7 +75,7 @@ impl Default for ProxyConfig {
 
             min_observations_for_detection: 5,
 
-            value_detection_threshold: 0.0,
+            value_detection_threshold: 0.3,
             max_values_per_observation: 10,
 
             ewma_alpha: 0.1,

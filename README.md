@@ -1,6 +1,6 @@
 # Geometry of Trust
 
-**A cryptographically signed, deterministic measurement framework for AI value alignment — built on the causal geometry of transformer residual streams.**
+**A cryptographically signed, deterministic measurement framework for AI value alignment — built on the causal geometry of transformer residual streams, with behavioral value profiling for closed-source models.**
 
 > The geometry is ready. The governance is not. The most important work in AI alignment is not technical. It is institutional.
 
@@ -30,7 +30,8 @@ This causal inner product weights directions in the residual stream by how much 
 - **Calibrated**: Platt scaling + ECE metric ensure confidence values are meaningful, not just ranked
 - **PKI-backed**: Agent certificates with expiry, revocation (CRL), and key rotation ceremonies
 - **Zero-training coherence**: Value incoherence detection needs only the unembedding matrix — no probes, no labels, no SGD
-- **Closed-source monitoring**: Proxy architecture monitors models with no internal access — behavioral value profiling with 4-signal deviation detection (including manifold density)
+- **Closed-source monitoring**: Proxy architecture monitors models with no internal access — behavioral value profiling with absolute cosine detection, 4-signal deviation detection, and configurable embedding backends (Ollama, OpenAI, etc.)
+- **Configurable value taxonomy**: Value concepts defined as natural-language descriptions in a TOML file, embedded through the reference model's geometry as multi-token concept anchors
 - **Manifold geometry**: k-NN density estimation and sectional curvature under the causal metric — characterises the shape of the value activation space
 - **Interpolation experiments**: Linear interpolation between activation vectors with per-step incoherence scoring, manifold membership testing, and model confidence tracking
 
@@ -59,9 +60,9 @@ got-web                        Layer 5b — Unified web UI with LLM chat + value
 | `got-store` | Attestation persistence (in-memory and on-disk with atomic writes), audit reports |
 | `got-enclave` | TEE abstraction — signing keys never leave the enclave boundary (software mock for PoC) |
 | `got-incoherence` | Zero-training coherence analysis: pairwise causal cosines, contradiction/redundancy detection, SVG heatmap and chord diagram generation |
-| `got-proxy` | **Proxy architecture for closed-source models**: behavioral value space (Welford + EWMA), 4-signal deviation detection (term z-score, profile drift, pairwise disruption, manifold density), Ed25519 behavioral attestations with manifold density/curvature readings, memory/file storage |
+| `got-proxy` | **Proxy architecture for closed-source models**: behavioral value space (Welford + EWMA), absolute cosine value detection, 4-signal deviation detection (term shift, profile drift, pairwise disruption, manifold density), Ed25519 behavioral attestations with manifold density/curvature readings, memory/file storage |
 | `got-cli` | CLI with `keygen`, `train`, `attest`, `verify`, `checkpoint`, `drift`, `calibration-report`, `issue-cert`, `revoke-cert`, `rotate-key`, `coherence-check` subcommands |
-| `got-web` | Axum web server with unified D3.js frontend: LLM chat relay (Ollama/OpenAI/Anthropic), live value monitoring via proxy, conversation coherence analysis with 6 visualizations (chord, heatmap, 3D sphere with density coloring, contradictions, redundancies, manifold geometry) |
+| `got-web` | Axum web server with unified D3.js frontend: LLM chat relay (Ollama/OpenAI/Anthropic), live value monitoring via proxy with configurable embedding backend, configurable value taxonomy (`--values`), conversation coherence analysis with 6 visualizations (chord, heatmap, 3D sphere with density coloring, contradictions, redundancies, manifold geometry) |
 
 ## Getting Started
 
@@ -294,6 +295,12 @@ cargo run --release -p got-web -- --synthetic
 cargo run --release -p got-web -- \
     --geometry data/models/gpt2.gotue \
     --vocab data/models/gpt2-vocab.json
+
+# With configurable value taxonomy (descriptions embedded through reference model)
+cargo run --release -p got-web -- \
+    --geometry data/models/gpt2.gotue \
+    --vocab data/models/gpt2-vocab.json \
+    --values values.toml
 ```
 
 Then open **http://127.0.0.1:3000** and click **Load Demo** to replay a sample conversation, or configure an LLM provider and chat live.
@@ -304,7 +311,7 @@ The UI has 7 analysis tabs, all updating per turn:
 
 | Tab | What it shows |
 |---|---|
-| **Values** | Detected value terms with activation z-scores |
+| **Values** | Detected value terms with cosine similarity scores |
 | **Deviation** | 4-signal deviation strip (term shift, profile drift, pairwise disruption, manifold density) |
 | **Contradictions** | Pairwise value contradictions with severity ratings |
 | **Chord** | D3 chord diagram of causal cosine relationships |
@@ -330,8 +337,8 @@ The UI has 7 analysis tabs, all updating per turn:
 | `POST` | `/api/conversation/analyse` | Per-turn value detection, coherence scores, contradiction tracking, speaker influence assessment |
 | `POST` | `/api/embed` | Text-to-embedding via reference model vocabulary (bag-of-words) |
 | `POST` | `/api/chat` | Relay to LLM provider (Ollama/OpenAI/Anthropic) — API key per-request, never stored |
-| `POST` | `/api/proxy/session` | Create a proxy monitoring session |
-| `POST` | `/api/proxy/session/:id/observe` | Submit an observation — returns detected values + deviation report |
+| `POST` | `/api/proxy/session` | Create a proxy monitoring session (optionally with `embedding_url` + `embedding_model` for external embedding) |
+| `POST` | `/api/proxy/session/:id/observe` | Submit text observation — proxy embeds internally, returns detected values + deviation report |
 | `GET` | `/api/proxy/session/:id/status` | Value space summary + latest deviation |
 | `GET` | `/api/proxy/session/:id/history` | Deviation history |
 | `POST` | `/api/proxy/session/:id/manifold` | Compute manifold geometry + signed behavioral attestation (density, curvature, per-term densities) |
@@ -349,7 +356,7 @@ The attestation schema supports four progressive levels of trust:
 | **Tier 3 — Reproduction** | v3 | Full re-extraction + re-probing + causal intervention scores + bitwise match |
 | **Tier 3+ — Manifold** | v4 | Tier 3 + manifold density reading + sectional curvature reading |
 
-Tier 0 is specifically for closed-source models (GPT-4, Claude, Gemini) where internal activations are inaccessible. The proxy uses a reference model's geometry as a measurement instrument, building a behavioral value profile from the model's text outputs.
+Tier 0 is specifically for closed-source models (GPT-4, Claude, Gemini) where internal activations are inaccessible. The proxy builds its own behavioral value space by embedding model outputs through a configurable embedding model (e.g. Ollama's nomic-embed-text) and measuring absolute cosine similarity against value concept anchors embedded through the same model. This ensures consistent measurement within a single embedding space. The proxy tracks value expression drift over time using Welford online statistics and EWMA recency weighting.
 
 ## Security
 
