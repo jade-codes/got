@@ -104,8 +104,9 @@ class ActivationModel:
             hidden = output[0]
         else:
             hidden = output
-        # Mean-pool across sequence positions -> (hidden_dim,)
-        self._captured = hidden[0].mean(dim=0).detach().float().cpu()
+        # Last token position — carries the contextualized meaning of the full input.
+        # Mean-pooling washes out value-specific signal (all descriptions look the same).
+        self._captured = hidden[0][-1].detach().float().cpu()
 
     def get_hidden_state(self, text: str) -> tuple[List[float], int]:
         """Run text through the model and return the captured hidden state.

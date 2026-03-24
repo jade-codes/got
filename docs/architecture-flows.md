@@ -477,7 +477,13 @@ hooks to capture residual stream activations at a configured layer.
 **Why intermediate layers?** The unembedding matrix Φ = UᵀU collapses
 value dimensions at the output layer (dim_eff = 1.1/13 for Qwen3.5 —
 all value terms map to the same "fluent English" direction). Middle
-layers (40-55% depth) separate semantic concepts much better.
+layers partially recover value structure: layer 16 with last-token
+pooling gives dim_eff = 3.16/13 (3 effective dimensions vs 1).
+
+**Why last-token pooling?** Mean-pooling across all positions destroys
+the value signal — function words (the, of, and) dominate the average.
+The last token position carries the contextualized meaning of the full
+input, preserving value-specific information.
 
 ```
   Python sidecar (scripts/activation_server.py)
@@ -486,7 +492,7 @@ layers (40-55% depth) separate semantic concepts much better.
        ├── Registers forward hook on target layer (e.g. layer 16/36)
        ├── POST /hidden_states  { text: "..." }
        │     → tokenize → forward pass → hook captures layer 16 output
-       │     → mean-pool across positions → (4096,) residual stream vector
+       │     → last-token position → (4096,) contextualized residual stream vector
        │     → Return { hidden_state: [f32 x 4096], layer, n_tokens }
        │
        └── POST /v1/chat/completions  (OpenAI-compatible)
@@ -508,10 +514,14 @@ layers (40-55% depth) separate semantic concepts much better.
            onto value directions through the output distribution
 ```
 
-**Key insight**: The embedding quality is the bottleneck, not the geometry.
-Bag-of-words averaging of unembedding rows gives all values similar scores
-(0.44-0.71 compressed range). Real hidden states from intermediate layers
-carry compositional semantics that should separate values meaningfully.
+**Key findings**:
+- Bag-of-words from the unembedding matrix: dim_eff = 1.1/13 (8%), all values identical
+- Layer 16 mean-pooled: still collapsed (function words dominate the average)
+- Layer 16 last-token: dim_eff = 3.16/13 (24%), 3 effective value dimensions recovered
+- UᵀU geometry should NOT be used with intermediate layers (it's output-specific);
+  use Φ = I (standard cosine) instead
+- Value descriptions separate better than single value term names (cosine 0.47 vs 0.67
+  for compassion/cruelty descriptions vs single words)
 
 ### 10. Manifold Collapse and Model Comparison
 

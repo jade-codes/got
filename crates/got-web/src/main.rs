@@ -164,7 +164,7 @@ fn build_synthetic_state() -> AppState {
 }
 
 /// Build application state from the reference model and value terms.
-fn build_state(args: &Args) -> AppState {
+async fn build_state(args: &Args) -> AppState {
     let gotue_path = args.geometry.as_deref()
         .expect("--geometry is required when not using --synthetic");
     let vocab_path = args.vocab.as_deref()
@@ -293,10 +293,63 @@ fn build_state(args: &Args) -> AppState {
     }
 
     available_terms.sort();
-    eprintln!("  resolved {} value terms", available_terms.len());
+    eprintln!("  resolved {} value terms (from unembedding)", available_terms.len());
 
     if term_embeddings.is_empty() {
         panic!("no value terms could be resolved — check taxonomy or vocabulary");
+    }
+
+    // If activation server is configured, re-embed term descriptions through it.
+    // This puts value anchors in the same intermediate-layer space as message embeddings.
+    if let Some(ref activation_url) = args.activation_server {
+        eprintln!("Re-embedding value terms through activation server at {activation_url}...");
+        let client = reqwest::Client::new();
+        let descriptions: Vec<(String, String)> = if let Some(ref tax) = taxonomy {
+            tax.values.iter().map(|e| (e.name.clone(), e.description.clone())).collect()
+        } else {
+            available_terms.iter().map(|t| (t.clone(), t.clone())).collect()
+        };
+
+        for (name, description) in &descriptions {
+            let body = serde_json::json!({ "text": description });
+            match client.post(format!("{activation_url}/hidden_states"))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(json) => {
+                            if let Some(arr) = json["hidden_state"].as_array() {
+                                let emb: Vec<f32> = arr.iter()
+                                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                    .collect();
+                                eprintln!("  '{}': {}d from layer {}", name, emb.len(),
+                                    json["layer"].as_u64().unwrap_or(0));
+                                term_embeddings.insert(name.clone(), emb);
+                            }
+                        }
+                        Err(e) => eprintln!("  warning: '{}' parse error: {e}", name),
+                    }
+                }
+                Ok(resp) => eprintln!("  warning: '{}' HTTP {}", name, resp.status()),
+                Err(e) => eprintln!("  warning: '{}' request error: {e}", name),
+            }
+        }
+        eprintln!("  re-embedded {} terms via activation server", descriptions.len());
+    }
+
+    // L2-normalize term embeddings so cosine similarity measures direction, not magnitude.
+    // Without this, hidden states from intermediate layers have huge norms (~1786) and
+    // the dominant shared direction overwhelms the participation ratio.
+    eprintln!("L2-normalizing term embeddings...");
+    for emb in term_embeddings.values_mut() {
+        let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > f32::EPSILON {
+            for v in emb.iter_mut() {
+                *v /= norm;
+            }
+        }
     }
 
     // Mean-centre term embeddings for pairwise analysis.
@@ -336,13 +389,20 @@ fn build_state(args: &Args) -> AppState {
     let centred_source = PrecomputedEmbeddings::new(centred_embeddings)
         .expect("failed to build centred embeddings source");
 
-    // Compute Φ = UᵀU — the causal inner product.
-    // Load the full unembedding matrix, compute the d×d Gram matrix, then drop U.
-    eprintln!("Computing Φ = UᵀU ({hidden_dim}×{hidden_dim}) from {gotue_path}...");
-    let geometry = {
+    // Choose geometry based on embedding source:
+    // - Activation server: Φ = I (standard cosine in hidden space) because intermediate
+    //   layer representations should NOT be projected through UᵀU — the whole point of
+    //   using middle layers is that value concepts separate there, unlike at the output.
+    // - Bag-of-words (no activation server): Φ = UᵀU because embeddings come from the
+    //   unembedding matrix and should be measured under the output geometry.
+    let use_identity = args.activation_server.is_some();
+    eprintln!("Building geometry: {}", if use_identity { "Φ = I (activation server mode)" } else { "Φ = UᵀU (unembedding mode)" });
+    let geometry = if use_identity {
+        CausalGeometry::identity(hidden_dim)
+    } else {
         let data = std::fs::read(gotue_path)
             .unwrap_or_else(|e| panic!("failed to read {gotue_path}: {e}"));
-        let mut offset = 6; // skip magic + version
+        let mut offset = 6;
         let vocab_size = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let hd = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
@@ -352,16 +412,14 @@ fn build_state(args: &Args) -> AppState {
         let total_bytes = vocab_size * hidden_dim * 4;
         let float_data = &data[offset..offset + total_bytes];
 
-        // Build faer matrix U (V × d) and compute Φ = UᵀU (d × d)
         let u_mat = faer::Mat::from_fn(vocab_size, hidden_dim, |i, j| {
             let idx = (i * hidden_dim + j) * 4;
             f32::from_le_bytes(float_data[idx..idx + 4].try_into().unwrap()) as f64
         });
         eprintln!("  U loaded: {} × {}, computing UᵀU...", vocab_size, hidden_dim);
-        let phi = u_mat.transpose() * &u_mat; // d × d
+        let phi = u_mat.transpose() * &u_mat;
         eprintln!("  UᵀU computed");
 
-        // Convert to flat f32 row-major
         let mut gram = vec![0.0f32; hidden_dim * hidden_dim];
         for i in 0..hidden_dim {
             for j in 0..hidden_dim {
@@ -369,7 +427,6 @@ fn build_state(args: &Args) -> AppState {
             }
         }
 
-        // U is dropped here — only the d×d Gram matrix is kept
         CausalGeometry::from_raw_gram(gram, hidden_dim)
             .expect("UᵀU should be positive semi-definite")
     };
@@ -411,7 +468,7 @@ async fn main() {
     let state = if args.synthetic {
         build_synthetic_state()
     } else if args.geometry.is_some() {
-        build_state(&args)
+        build_state(&args).await
     } else {
         eprintln!("error: specify --geometry <path.gotue> --vocab <vocab.json>, or --synthetic");
         std::process::exit(1);

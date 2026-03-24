@@ -310,7 +310,9 @@ cargo run --release -p got-web -- \
     --activation-server http://localhost:8100
 ```
 
-The activation server serves intermediate-layer hidden states from the actual model. When configured, `/api/embed` returns real residual stream activations measured under Φ = UᵀU instead of bag-of-words token averaging. The activation server also provides an OpenAI-compatible `/v1/chat/completions` endpoint — set the UI's base URL to `http://localhost:8100/v1`.
+The activation server captures the **last-token hidden state** at the configured layer. This carries the contextualized meaning of the full input, unlike mean-pooling which washes out value-specific signal. When configured, `/api/embed` returns real residual stream activations measured under Φ = I (standard cosine in hidden space — intermediate layers should not use UᵀU which is output-layer-specific). The activation server also provides an OpenAI-compatible `/v1/chat/completions` endpoint — set the UI's base URL to `http://localhost:8100/v1`.
+
+**Key finding**: UᵀU collapses at the unembedding layer (dim_eff = 1.1/13 for Qwen3.5). Layer 16 last-token activations recover 3 effective dimensions (dim_eff = 3.16/13). The dominant shared direction still accounts for 55%, but the remaining 12 dimensions carry real value-discriminating signal.
 
 Then open **http://127.0.0.1:3000** and click **Load Demo** to replay a sample conversation, or configure an LLM provider and chat live.
 
@@ -353,7 +355,7 @@ The UI has 11 analysis tabs in 3 groups:
 - **Activation server**: serves real intermediate-layer hidden states from a local model (Qwen3-8B in 4-bit, ~5GB VRAM) — also provides OpenAI-compatible chat
 - **Manifold health badge**: score strip shows ON/OFF manifold status per observation
 - **Attested manifold**: every manifold computation is Ed25519-signed and chained
-- **Manifold collapse detection**: dim_eff shows how many independent value dimensions exist under the causal geometry (UᵀU collapses for most models — dim_eff = 1.1/13 for Qwen3.5, indicating one effective dimension at the unembedding layer)
+- **Manifold collapse detection**: dim_eff shows how many independent value dimensions exist. UᵀU collapses at the unembedding layer (dim_eff = 1.1/13). Intermediate-layer activations via the activation server recover 3+ effective dimensions (dim_eff = 3.16/13 at layer 16 with last-token pooling)
 
 **Endpoints:**
 
@@ -449,7 +451,7 @@ This project proves the **technical substrate** — that the causal inner produc
 - **Institutional governance** — who has standing to adjudicate trust
 - **Platt calibration ground truth** — the calibration pipeline is functional but needs real-world labelled datasets for meaningful ECE scores
 - **Threshold calibration** — coherence detection thresholds need tuning on real conversational data
-- **UᵀU collapse** — the causal inner product at the unembedding layer collapses value dimensions (dim_eff = 1.1/13 for Qwen3.5); intermediate-layer activations via the activation server address this, but the optimal layer selection is model-dependent
+- **UᵀU collapse** — the causal inner product at the unembedding layer collapses value dimensions (dim_eff = 1.1/13 for Qwen3.5); intermediate-layer activations partially address this (dim_eff = 3.16/13 at layer 16 with last-token pooling), but optimal layer selection is model-dependent and mean-pooling destroys the signal
 
 Those are the hard problems. This is the plumbing that proves the hard problems are worth solving.
 
