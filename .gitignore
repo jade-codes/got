@@ -239,4 +239,5 @@ __marimo__/
 # Large model binary files (exceed GitHub 100MB limit)
 data/models/*.gotue
 node_modules/
-.firebase/
+.firebase/*.gguf
+data/models/qwen35-9b-vocab.json
