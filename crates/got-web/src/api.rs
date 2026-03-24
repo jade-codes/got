@@ -13,7 +13,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, Json};
-use got_core::geometry::CausalGeometry;
 use got_incoherence::coherence::{CoherenceConfig, Contradiction, Redundancy, PairwiseRelation};
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +28,8 @@ pub struct ConversationRequest {
     pub antonym_threshold: Option<f32>,
     pub synonym_threshold: Option<f32>,
     /// cos_Φ threshold for value detection (default: 0.3).
-    pub detection_threshold: Option<f32>,
+    #[serde(default)]
+    pub _detection_threshold: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,8 +161,6 @@ fn contradiction_key(c: &Contradiction) -> (String, String) {
 fn detect_values(
     msg_embedding: &[f32],
     term_embeddings: &HashMap<String, Vec<f32>>,
-    _geometry: &CausalGeometry,
-    _threshold: f32,
     max_per_message: usize,
 ) -> Vec<DetectedValue> {
     // Compute raw logits: h · u_i (standard dot product)
@@ -241,8 +239,6 @@ pub async fn analyse_conversation(
         synonym_threshold: req.synonym_threshold.unwrap_or(state.default_config.synonym_threshold),
         severity_scale: state.default_config.severity_scale,
     };
-    let detection_threshold = req.detection_threshold.unwrap_or(0.3);
-
     let introduction_threshold = state.introduction_threshold;
 
     let mut cumulative_values: Vec<String> = Vec::new();
@@ -268,8 +264,6 @@ pub async fn analyse_conversation(
         let detected = detect_values(
             &msg.embedding,
             &state.term_embeddings,
-            &state.geometry,
-            detection_threshold,
             6, // top 6 values per message
         );
 

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 
-use crate::AppState;
+use crate::{api_err, embed_text_bow, ApiError, AppState};
 
 #[derive(Debug, Deserialize)]
 pub struct EmbedRequest {
@@ -29,29 +29,18 @@ pub struct EmbedResponse {
     pub dim: usize,
     pub matched_tokens: usize,
     pub total_tokens: usize,
-    /// "activation" if from the sidecar, "bag-of-words" if from vocab lookup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct EmbedErrorResponse {
-    pub error: String,
 }
 
 /// POST /api/embed — generate an embedding vector from text.
 pub async fn embed_text(
     State(state): State<Arc<AppState>>,
     Json(req): Json<EmbedRequest>,
-) -> Result<Json<EmbedResponse>, (StatusCode, Json<EmbedErrorResponse>)> {
+) -> Result<Json<EmbedResponse>, (StatusCode, Json<ApiError>)> {
     let text = req.text.trim();
     if text.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(EmbedErrorResponse {
-                error: "text is empty".into(),
-            }),
-        ));
+        return Err(api_err(StatusCode::BAD_REQUEST, "text is empty"));
     }
 
     // Try activation server first (real residual stream activations)
@@ -64,53 +53,20 @@ pub async fn embed_text(
         }
     }
 
-    // Fallback: bag-of-words averaging from unembedding matrix rows
-    let dim = state.hidden_dim;
-    let tokens: Vec<&str> = text.split_whitespace().collect();
-    let total_tokens = tokens.len();
-
-    let mut sum = vec![0.0f32; dim];
-    let mut matched = 0usize;
-
-    for token in &tokens {
-        let lower = token.to_lowercase();
-        let clean: String = lower
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
-            .collect();
-        if clean.is_empty() {
-            continue;
-        }
-
-        let found = if let Some(ref lookup) = state.vocab_lookup {
-            lookup.embed(&clean)
-        } else {
-            None
-        };
-        let found = found
-            .or_else(|| state.embedding_source.embed(&clean))
-            .or_else(|| state.term_embeddings.get(&clean).cloned());
-
-        if let Some(emb) = found {
-            for (s, e) in sum.iter_mut().zip(emb.iter()) {
-                *s += e;
-            }
-            matched += 1;
-        }
-    }
-
-    if matched > 0 {
-        let scale = 1.0 / matched as f32;
-        for s in sum.iter_mut() {
-            *s *= scale;
-        }
-    }
+    // Fallback: bag-of-words averaging
+    let (embedding, matched, total) = embed_text_bow(
+        text,
+        state.hidden_dim,
+        state.vocab_lookup.as_ref(),
+        state.embedding_source.as_ref(),
+        &state.term_embeddings,
+    );
 
     Ok(Json(EmbedResponse {
-        embedding: sum,
-        dim,
+        embedding,
+        dim: state.hidden_dim,
         matched_tokens: matched,
-        total_tokens,
+        total_tokens: total,
         source: Some("bag-of-words".into()),
     }))
 }

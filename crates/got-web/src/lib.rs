@@ -45,6 +45,87 @@ impl VocabLookup {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared utilities
+// ---------------------------------------------------------------------------
+
+/// Hex-encode a byte slice.
+pub fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Shared error response for all API endpoints.
+#[derive(Debug, serde::Serialize)]
+pub struct ApiError {
+    pub error: String,
+}
+
+/// Build an axum error response.
+pub fn api_err(
+    status: axum::http::StatusCode,
+    msg: impl Into<String>,
+) -> (axum::http::StatusCode, axum::Json<ApiError>) {
+    (status, axum::Json(ApiError { error: msg.into() }))
+}
+
+/// Clean a token for vocabulary lookup: lowercase, keep only alphanumeric + hyphens + apostrophes.
+pub fn clean_token(token: &str) -> String {
+    token
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
+        .collect()
+}
+
+/// Embed text by averaging token embeddings from available sources.
+///
+/// Tries vocab_lookup first, then embedding_source, then term_embeddings.
+/// Returns (embedding, matched_count, total_count).
+pub fn embed_text_bow(
+    text: &str,
+    dim: usize,
+    vocab_lookup: Option<&VocabLookup>,
+    embedding_source: &dyn EmbeddingSource,
+    term_embeddings: &HashMap<String, Vec<f32>>,
+) -> (Vec<f32>, usize, usize) {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let total = tokens.len();
+    let mut sum = vec![0.0f32; dim];
+    let mut matched = 0usize;
+
+    for token in &tokens {
+        let clean = clean_token(token);
+        if clean.is_empty() {
+            continue;
+        }
+
+        let found = vocab_lookup
+            .and_then(|vl| vl.embed(&clean))
+            .or_else(|| embedding_source.embed(&clean))
+            .or_else(|| term_embeddings.get(&clean).cloned());
+
+        if let Some(emb) = found {
+            for (s, e) in sum.iter_mut().zip(emb.iter()) {
+                *s += e;
+            }
+            matched += 1;
+        }
+    }
+
+    if matched > 0 {
+        let scale = 1.0 / matched as f32;
+        for s in sum.iter_mut() {
+            *s *= scale;
+        }
+    }
+
+    (sum, matched, total)
+}
+
+// ---------------------------------------------------------------------------
+// AppState
+// ---------------------------------------------------------------------------
+
 /// Shared application state, built at startup and shared across all handlers.
 pub struct AppState {
     pub geometry: CausalGeometry,

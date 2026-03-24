@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use got_core::{GeometricAttestation, InnerProduct, Precision, SCHEMA_VERSION};
 use got_probe::read_probe;
 
-use crate::AppState;
+use crate::{api_err, ApiError, AppState};
 
 // ---------------------------------------------------------------------------
 // Shared attestation state (accumulated readings for signing)
@@ -92,18 +92,6 @@ pub struct VerifyResponse {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct AttestErrorResponse {
-    pub error: String,
-}
-
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<AttestErrorResponse>) {
-    (status, Json(AttestErrorResponse { error: msg.into() }))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 // ---------------------------------------------------------------------------
 // POST /api/attest/read — Run probes on a message's hidden state
@@ -112,17 +100,17 @@ fn hex_encode(bytes: &[u8]) -> String {
 pub async fn attest_read(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ReadRequest>,
-) -> Result<Json<ReadResponse>, (StatusCode, Json<AttestErrorResponse>)> {
+) -> Result<Json<ReadResponse>, (StatusCode, Json<ApiError>)> {
     let probe_set = state.probe_set.as_ref()
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no probes loaded (start with --probes)"))?;
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "no probes loaded (start with --probes)"))?;
 
     // Get hidden state from activation server
     let activation_url = state.activation_server_url.as_ref()
-        .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "no activation server configured"))?;
+        .ok_or_else(|| api_err(StatusCode::SERVICE_UNAVAILABLE, "no activation server configured"))?;
 
     let embedding = crate::embed_api::embed_via_activation_server(&req.text, activation_url)
         .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("activation server: {e}")))?;
+        .map_err(|e| api_err(StatusCode::BAD_GATEWAY, format!("activation server: {e}")))?;
 
     let h = &embedding.embedding;
 
@@ -139,7 +127,7 @@ pub async fn attest_read(
                 });
             }
             Err(e) => {
-                return Err(err(StatusCode::INTERNAL_SERVER_ERROR,
+                return Err(api_err(StatusCode::INTERNAL_SERVER_ERROR,
                     format!("probe '{}': {e}", probe.dimension_name)));
             }
         }
@@ -169,18 +157,18 @@ pub async fn attest_read(
 pub async fn attest_sign(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SignRequest>,
-) -> Result<Json<SignResponse>, (StatusCode, Json<AttestErrorResponse>)> {
+) -> Result<Json<SignResponse>, (StatusCode, Json<ApiError>)> {
     let probe_set = state.probe_set.as_ref()
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no probes loaded"))?;
+        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "no probes loaded"))?;
     let signing_key = state.signing_key.as_ref()
-        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "no signing key"))?;
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "no signing key"))?;
     let attest_state_mutex = state.attestation_state.as_ref()
-        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "no attestation state"))?;
+        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "no attestation state"))?;
 
     let mut ast = attest_state_mutex.lock().await;
 
     if ast.readings_per_layer.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "no readings accumulated — send messages first"));
+        return Err(api_err(StatusCode::BAD_REQUEST, "no readings accumulated — send messages first"));
     }
 
     let now = std::time::SystemTime::now()
@@ -220,10 +208,10 @@ pub async fn attest_sign(
     };
 
     let signed = got_attest::assemble_and_sign(attestation, signing_key)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("sign: {e}")))?;
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("sign: {e}")))?;
 
     let hash = got_attest::attestation_hash(&signed)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("hash: {e}")))?;
+        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("hash: {e}")))?;
 
     let readings_count = ast.readings_per_layer.len();
 
@@ -233,8 +221,8 @@ pub async fn attest_sign(
     ast.readings_per_layer.clear();
 
     Ok(Json(SignResponse {
-        attestation_hash: hex_encode(&hash),
-        signature: hex_encode(&signed.signature),
+        attestation_hash: crate::hex_encode(&hash),
+        signature: crate::hex_encode(&signed.signature),
         schema_version: signed.schema_version,
         observation_count: ast.observation_count,
         readings_count,
@@ -249,24 +237,24 @@ pub async fn attest_sign(
 pub async fn attest_verify(
     State(_state): State<Arc<AppState>>,
     Json(req): Json<VerifyRequest>,
-) -> Result<Json<VerifyResponse>, (StatusCode, Json<AttestErrorResponse>)> {
+) -> Result<Json<VerifyResponse>, (StatusCode, Json<ApiError>)> {
     let attestation: GeometricAttestation = serde_json::from_str(&req.attestation_json)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid attestation JSON: {e}")))?;
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, format!("invalid attestation JSON: {e}")))?;
 
     // Parse public key from hex
     let pk_bytes: Vec<u8> = (0..req.public_key_hex.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&req.public_key_hex[i..i + 2], 16))
         .collect::<Result<Vec<u8>, _>>()
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid public key hex: {e}")))?;
+        .map_err(|e| api_err(StatusCode::BAD_REQUEST, format!("invalid public key hex: {e}")))?;
 
     if pk_bytes.len() != 32 {
-        return Err(err(StatusCode::BAD_REQUEST, "public key must be 32 bytes"));
+        return Err(api_err(StatusCode::BAD_REQUEST, "public key must be 32 bytes"));
     }
 
     let vk = ed25519_dalek::VerifyingKey::from_bytes(
         pk_bytes.as_slice().try_into().unwrap(),
-    ).map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid public key: {e}")))?;
+    ).map_err(|e| api_err(StatusCode::BAD_REQUEST, format!("invalid public key: {e}")))?;
 
     match got_attest::verify(&attestation, &vk) {
         Ok(()) => Ok(Json(VerifyResponse { valid: true, error: None })),

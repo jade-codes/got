@@ -102,12 +102,10 @@ struct ValueTaxonomy {
 struct ValueEntry {
     name: String,
     description: String,
-    #[allow(dead_code)]
     #[serde(default)]
-    cluster: Option<String>,
-    #[allow(dead_code)]
+    _cluster: Option<String>,
     #[serde(default)]
-    antonyms: Vec<String>,
+    _antonyms: Vec<String>,
 }
 
 
@@ -487,10 +485,6 @@ async fn build_state(args: &Args) -> AppState {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -507,7 +501,7 @@ async fn main() {
     // Generate signing key for attestations
     let mut state = state;
     let sk = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let vk_hex = hex_encode(sk.verifying_key().as_bytes());
+    let vk_hex = got_web::hex_encode(sk.verifying_key().as_bytes());
     state.signing_key = Some(sk);
     state.verifying_key_hex = Some(vk_hex.clone());
 

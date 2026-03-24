@@ -211,11 +211,6 @@ pub struct CurvatureSummary {
     pub num_degenerate: u32,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ProxyErrorResponse {
-    pub error: String,
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -236,10 +231,6 @@ fn deviation_to_response(d: &DeviationReport) -> DeviationResponse {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn parse_attestation_type(s: Option<&str>) -> AttestationType {
     match s {
         Some("baseline") => AttestationType::Baseline,
@@ -247,13 +238,6 @@ fn parse_attestation_type(s: Option<&str>) -> AttestationType {
         Some("session_start") => AttestationType::SessionStart,
         _ => AttestationType::Snapshot,
     }
-}
-
-fn proxy_err(
-    status: StatusCode,
-    msg: impl Into<String>,
-) -> (StatusCode, Json<ProxyErrorResponse>) {
-    (status, Json(ProxyErrorResponse { error: msg.into() }))
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +248,7 @@ fn proxy_err(
 pub async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateSessionRequest>,
-) -> Result<Json<CreateSessionResponse>, (StatusCode, Json<ProxyErrorResponse>)> {
+) -> Result<Json<CreateSessionResponse>, (StatusCode, Json<crate::ApiError>)> {
     let session_id = req
         .session_id
         .unwrap_or_else(|| format!("proxy-{}", rand::random::<u64>()));
@@ -291,7 +275,7 @@ pub async fn create_session(
             }
 
             if term_embeddings.is_empty() {
-                return Err(proxy_err(
+                return Err(crate::api_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "no value terms could be embedded via the embedding API",
                 ));
@@ -299,13 +283,13 @@ pub async fn create_session(
 
             let dim = term_embeddings.values().next().unwrap().len();
             let source = PrecomputedEmbeddings::new(term_embeddings)
-                .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding source: {e}")))?;
+                .map_err(|e| crate::api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding source: {e}")))?;
 
             (source, Some(emb_config), dim)
         } else {
             // Fallback: use reference model embeddings from AppState.
             let source = PrecomputedEmbeddings::new(state.term_embeddings.clone())
-                .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding source: {e}")))?;
+                .map_err(|e| crate::api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("embedding source: {e}")))?;
 
             (source, None, state.hidden_dim)
         };
@@ -321,9 +305,9 @@ pub async fn create_session(
         ProxyConfig::default(),
         MemoryValueSpaceStore::new(),
     )
-    .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create session: {e}")))?;
+    .map_err(|e| crate::api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("create session: {e}")))?;
 
-    let geometry_hash = hex_encode(&state.geometry.geometry_hash());
+    let geometry_hash = crate::hex_encode(&state.geometry.geometry_hash());
 
     state
         .proxy
@@ -354,7 +338,7 @@ pub async fn observe(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Json(req): Json<ObserveRequest>,
-) -> Result<Json<ObserveResponse>, (StatusCode, Json<ProxyErrorResponse>)> {
+) -> Result<Json<ObserveResponse>, (StatusCode, Json<crate::ApiError>)> {
     // Resolve embedding: use pre-computed if provided, otherwise embed text.
     let embedding = if let Some(emb) = req.embedding {
         emb
@@ -363,41 +347,28 @@ pub async fn observe(
         if let Some(config) = configs.get(&session_id) {
             embed_text_via_api(text, config)
                 .await
-                .map_err(|e| proxy_err(StatusCode::BAD_GATEWAY, format!("embed: {e}")))?
+                .map_err(|e| crate::api_err(StatusCode::BAD_GATEWAY, format!("embed: {e}")))?
         } else {
-            // Fallback: average reference model token embeddings.
-            let dim = state.hidden_dim;
-            let mut sum = vec![0.0f32; dim];
-            let mut matched = 0usize;
-            for token in text.split_whitespace() {
-                let clean: String = token.to_lowercase()
-                    .chars()
-                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '\'')
-                    .collect();
-                if clean.is_empty() { continue; }
-                if let Some(emb) = state.embedding_source.embed(&clean) {
-                    for (s, e) in sum.iter_mut().zip(emb.iter()) { *s += e; }
-                    matched += 1;
-                }
-            }
-            if matched > 0 {
-                let scale = 1.0 / matched as f32;
-                for s in sum.iter_mut() { *s *= scale; }
-            }
-            sum
+            let (emb, _, _) = crate::embed_text_bow(
+                text, state.hidden_dim,
+                state.vocab_lookup.as_ref(),
+                state.embedding_source.as_ref(),
+                &state.term_embeddings,
+            );
+            emb
         }
     } else {
-        return Err(proxy_err(StatusCode::BAD_REQUEST, "provide either 'text' or 'embedding'"));
+        return Err(crate::api_err(StatusCode::BAD_REQUEST, "provide either 'text' or 'embedding'"));
     };
 
     let mut sessions = state.proxy.sessions.lock().await;
     let session = sessions
         .get_mut(&session_id)
-        .ok_or_else(|| proxy_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
+        .ok_or_else(|| crate::api_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
 
     let result = session
         .observe(&embedding, &req.speaker)
-        .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("observe: {e}")))?;
+        .map_err(|e| crate::api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("observe: {e}")))?;
 
     Ok(Json(ObserveResponse {
         observation_count: result.observation_count,
@@ -418,11 +389,11 @@ pub async fn observe(
 pub async fn session_status(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
-) -> Result<Json<SessionStatusResponse>, (StatusCode, Json<ProxyErrorResponse>)> {
+) -> Result<Json<SessionStatusResponse>, (StatusCode, Json<crate::ApiError>)> {
     let sessions = state.proxy.sessions.lock().await;
     let session = sessions
         .get(&session_id)
-        .ok_or_else(|| proxy_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
+        .ok_or_else(|| crate::api_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
 
     let status = session.status();
     Ok(Json(SessionStatusResponse {
@@ -440,11 +411,11 @@ pub async fn session_status(
 pub async fn deviation_history(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
-) -> Result<Json<HistoryResponse>, (StatusCode, Json<ProxyErrorResponse>)> {
+) -> Result<Json<HistoryResponse>, (StatusCode, Json<crate::ApiError>)> {
     let sessions = state.proxy.sessions.lock().await;
     let session = sessions
         .get(&session_id)
-        .ok_or_else(|| proxy_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
+        .ok_or_else(|| crate::api_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
 
     let history = session.deviation_history();
     Ok(Json(HistoryResponse {
@@ -461,15 +432,15 @@ pub async fn deviation_history(
 pub async fn manifold(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
-) -> Result<Json<ManifoldResponse>, (StatusCode, Json<ProxyErrorResponse>)> {
+) -> Result<Json<ManifoldResponse>, (StatusCode, Json<crate::ApiError>)> {
     let mut sessions = state.proxy.sessions.lock().await;
     let session = sessions
         .get_mut(&session_id)
-        .ok_or_else(|| proxy_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
+        .ok_or_else(|| crate::api_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
 
     let (attestation, term_densities) = session
         .attest_manifold()
-        .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("attestation: {e}")))?;
+        .map_err(|e| crate::api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("attestation: {e}")))?;
 
     let hash = got_proxy::attestation::attestation_hash(&attestation);
 
@@ -497,7 +468,7 @@ pub async fn manifold(
         .collect();
 
     Ok(Json(ManifoldResponse {
-        attestation_hash: hex_encode(&hash),
+        attestation_hash: crate::hex_encode(&hash),
         sequence_number: attestation.sequence_number,
         observation_count: attestation.observation_count,
         manifold_density,
@@ -531,16 +502,16 @@ pub async fn snapshot(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Json(req): Json<SnapshotRequest>,
-) -> Result<Json<SnapshotResponse>, (StatusCode, Json<ProxyErrorResponse>)> {
+) -> Result<Json<SnapshotResponse>, (StatusCode, Json<crate::ApiError>)> {
     let mut sessions = state.proxy.sessions.lock().await;
     let session = sessions
         .get_mut(&session_id)
-        .ok_or_else(|| proxy_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
+        .ok_or_else(|| crate::api_err(StatusCode::NOT_FOUND, format!("session not found: {session_id}")))?;
 
     let att_type = parse_attestation_type(req.attestation_type.as_deref());
     let attestation = session
         .snapshot_and_attest(att_type)
-        .map_err(|e| proxy_err(StatusCode::INTERNAL_SERVER_ERROR, format!("attestation: {e}")))?;
+        .map_err(|e| crate::api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("attestation: {e}")))?;
 
     let hash = got_proxy::attestation::attestation_hash(&attestation);
 
@@ -562,7 +533,7 @@ pub async fn snapshot(
     let term_densities = session.term_densities().clone();
 
     Ok(Json(SnapshotResponse {
-        attestation_hash: hex_encode(&hash),
+        attestation_hash: crate::hex_encode(&hash),
         sequence_number: attestation.sequence_number,
         observation_count: attestation.observation_count,
         attestation_type: format!("{:?}", attestation.attestation_type),
