@@ -131,30 +131,83 @@ async fn demo_conversation(
 // State builders
 // ---------------------------------------------------------------------------
 
-/// Build state from compiled-in synthetic demo data (for deployment without a reference model).
-fn build_synthetic_state() -> AppState {
-    let term_embeddings: HashMap<String, Vec<f32>> =
-        serde_json::from_str(demo::demo_embeddings_json())
+/// Build state for demo/deployment mode.
+///
+/// When --demo-conversation points to a layer-8 conversation with 4096d embeddings,
+/// infers hidden_dim from the embeddings and loads probes if provided.
+/// Falls back to compiled-in 32d synthetic data otherwise.
+fn build_synthetic_state(args: &Args) -> AppState {
+    // Check if a custom demo conversation is provided with higher-dim embeddings
+    let (demo_json, dim) = if let Some(ref demo_path) = args.demo_conversation {
+        let json = std::fs::read_to_string(demo_path)
+            .unwrap_or_else(|e| panic!("failed to read {demo_path}: {e}"));
+        // Detect hidden_dim from first message embedding
+        let parsed: serde_json::Value = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("failed to parse demo JSON: {e}"));
+        let emb_dim = parsed["messages"][0]["embedding"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if emb_dim > 0 {
+            eprintln!("Demo conversation: {demo_path} ({emb_dim}d embeddings)");
+            (json, emb_dim)
+        } else {
+            (demo::demo_conversation_json().to_string(), 0)
+        }
+    } else {
+        (demo::demo_conversation_json().to_string(), 0)
+    };
+
+    let (term_embeddings, source, hidden_dim) = if dim > 32 {
+        // High-dim demo: use compiled-in term names but create empty embeddings at the right dim.
+        // The demo replay uses pre-computed embeddings from the conversation JSON,
+        // so term embeddings just need to exist for pairwise analysis.
+        let raw: HashMap<String, Vec<f32>> = serde_json::from_str(demo::demo_embeddings_json())
             .expect("failed to parse demo embeddings");
+        // Create zero-padded embeddings at the demo's dimension
+        let mut padded: HashMap<String, Vec<f32>> = HashMap::new();
+        for (term, _) in &raw {
+            padded.insert(term.clone(), vec![0.0; dim]);
+        }
+        let source = PrecomputedEmbeddings::new(padded.clone())
+            .expect("failed to build padded embeddings");
+        (padded, source, dim)
+    } else {
+        // Standard 32d synthetic
+        let raw: HashMap<String, Vec<f32>> = serde_json::from_str(demo::demo_embeddings_json())
+            .expect("failed to parse demo embeddings");
+        let d = raw.values().next().unwrap().len();
+        let source = PrecomputedEmbeddings::from_json(demo::demo_embeddings_json())
+            .expect("failed to load demo embeddings");
+        (raw, source, d)
+    };
 
-    let dim = term_embeddings.values().next().unwrap().len();
-
-    let geometry = CausalGeometry::identity(dim);
-
-    let source = PrecomputedEmbeddings::from_json(demo::demo_embeddings_json())
-        .expect("failed to load demo embeddings");
+    let geometry = CausalGeometry::identity(hidden_dim);
 
     let mut available_terms: Vec<String> = term_embeddings.keys().cloned().collect();
     available_terms.sort();
+
+    // Load probes if provided
+    let probe_set = if let Some(ref probes_path) = args.probes {
+        eprintln!("Loading probes from {probes_path}...");
+        let json = std::fs::read_to_string(probes_path)
+            .unwrap_or_else(|e| panic!("failed to read {probes_path}: {e}"));
+        let ps: got_probe::ProbeSet = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("failed to parse probes: {e}"));
+        eprintln!("  {} probes for layer {}", ps.probes.len(), ps.layer);
+        Some(ps)
+    } else {
+        None
+    };
 
     AppState {
         geometry,
         term_embeddings,
         embedding_source: Box::new(source),
         available_terms,
-        hidden_dim: dim,
-        mode: "synthetic-demo".into(),
-        demo_conversation_json: demo::demo_conversation_json().to_string(),
+        hidden_dim,
+        mode: "demo".into(),
+        demo_conversation_json: demo_json,
         default_config: CoherenceConfig {
             antonym_threshold: -0.5,
             synonym_threshold: 0.8,
@@ -164,10 +217,10 @@ fn build_synthetic_state() -> AppState {
         proxy: ProxyState::new(),
         vocab_lookup: None,
         activation_server_url: None,
-        probe_set: None,
+        probe_set,
         signing_key: None,
         verifying_key_hex: None,
-        attestation_state: None,
+        attestation_state: Some(tokio::sync::Mutex::new(AttestationState::new())),
     }
 }
 
@@ -490,7 +543,7 @@ async fn main() {
     let args = Args::parse();
 
     let state = if args.synthetic {
-        build_synthetic_state()
+        build_synthetic_state(&args)
     } else if args.geometry.is_some() {
         build_state(&args).await
     } else {

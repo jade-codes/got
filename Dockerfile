@@ -14,7 +14,11 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 
 COPY --from=builder /app/target/release/got-web /usr/local/bin/got-web
 COPY --from=builder /app/crates/got-web/static /app/static
-COPY --from=builder /app/data /app/data
+COPY --from=builder /app/data/demo /app/data/demo
+COPY --from=builder /app/data/models/gpt2-demo-conversation.json /app/data/models/gpt2-demo-conversation.json
+COPY --from=builder /app/data/models/demo-conversation-layer8.json /app/data/models/demo-conversation-layer8.json
+COPY --from=builder /app/data/probes /app/data/probes
+COPY --from=builder /app/values.toml /app/values.toml
 
 WORKDIR /app
 
@@ -23,5 +27,5 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-# Run in synthetic mode — Cloud Run sets PORT env var
-CMD ["sh", "-c", "got-web --synthetic --listen 0.0.0.0:${PORT} --static-dir /app/static"]
+# Synthetic mode with layer-8 demo conversation and trained probes
+CMD ["sh", "-c", "got-web --synthetic --listen 0.0.0.0:${PORT} --static-dir /app/static --demo-conversation /app/data/models/demo-conversation-layer8.json --probes /app/data/probes/probes_layer8.json"]
