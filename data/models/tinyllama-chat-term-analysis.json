@@ -1,0 +1,113 @@
+{
+  "honesty": {
+    "found": false
+  },
+  "integrity": {
+    "found": true,
+    "token_index": 28410,
+    "token_string": "integrity",
+    "norm": 1.0144
+  },
+  "fairness": {
+    "found": false
+  },
+  "transparency": {
+    "found": false
+  },
+  "accountability": {
+    "found": false
+  },
+  "justice": {
+    "found": true,
+    "token_index": 15426,
+    "token_string": "justice",
+    "norm": 1.0905
+  },
+  "freedom": {
+    "found": true,
+    "token_index": 16082,
+    "token_string": "freedom",
+    "norm": 0.9825
+  },
+  "equality": {
+    "found": true,
+    "token_index": 17193,
+    "token_string": "equality",
+    "norm": 0.9924
+  },
+  "equity": {
+    "found": false
+  },
+  "compassion": {
+    "found": false
+  },
+  "empathy": {
+    "found": false
+  },
+  "courage": {
+    "found": true,
+    "token_index": 19872,
+    "token_string": "courage",
+    "norm": 0.9683
+  },
+  "bravery": {
+    "found": false
+  },
+  "wisdom": {
+    "found": true,
+    "token_index": 29714,
+    "token_string": "wisdom",
+    "norm": 1.0486
+  },
+  "humility": {
+    "found": false
+  },
+  "loyalty": {
+    "found": false
+  },
+  "responsibility": {
+    "found": true,
+    "token_index": 23134,
+    "token_string": "responsibility",
+    "norm": 1.0177
+  },
+  "resilience": {
+    "found": false
+  },
+  "openness": {
+    "found": false
+  },
+  "creativity": {
+    "found": false
+  },
+  "innovation": {
+    "found": false
+  },
+  "efficiency": {
+    "found": true,
+    "token_index": 19201,
+    "token_string": "efficiency",
+    "norm": 0.9666
+  },
+  "tradition": {
+    "found": true,
+    "token_index": 11399,
+    "token_string": "tradition",
+    "norm": 1.025
+  },
+  "cruelty": {
+    "found": false
+  },
+  "oppression": {
+    "found": false
+  },
+  "secrecy": {
+    "found": false
+  },
+  "truthfulness": {
+    "found": false
+  },
+  "cowardice": {
+    "found": false
+  }
+}

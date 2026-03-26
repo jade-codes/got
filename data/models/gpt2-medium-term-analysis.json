@@ -3,157 +3,157 @@
     "found": true,
     "token_index": 24345,
     "token_string": " honesty",
-    "norm": 3.8554
+    "norm": 3.5305
   },
   "integrity": {
     "found": true,
     "token_index": 11540,
     "token_string": " integrity",
-    "norm": 3.7282
+    "norm": 3.3477
   },
   "fairness": {
     "found": true,
     "token_index": 22692,
     "token_string": " fairness",
-    "norm": 3.9407
+    "norm": 3.5782
   },
   "transparency": {
     "found": true,
     "token_index": 13902,
     "token_string": " transparency",
-    "norm": 3.6879
+    "norm": 3.3985
   },
   "accountability": {
     "found": true,
     "token_index": 18241,
     "token_string": " accountability",
-    "norm": 3.6814
+    "norm": 3.3453
   },
   "justice": {
     "found": true,
     "token_index": 31012,
     "token_string": "justice",
-    "norm": 4.5875
+    "norm": 4.1714
   },
   "freedom": {
     "found": true,
     "token_index": 41295,
     "token_string": "freedom",
-    "norm": 4.1577
+    "norm": 3.9007
   },
   "equality": {
     "found": true,
     "token_index": 48203,
     "token_string": "equality",
-    "norm": 4.5355
+    "norm": 4.1418
   },
   "equity": {
     "found": true,
     "token_index": 13598,
     "token_string": " equity",
-    "norm": 3.7326
+    "norm": 3.4582
   },
   "compassion": {
     "found": true,
     "token_index": 15213,
     "token_string": " compassion",
-    "norm": 3.6481
+    "norm": 3.2512
   },
   "empathy": {
     "found": true,
     "token_index": 21452,
     "token_string": " empathy",
-    "norm": 3.7438
+    "norm": 3.3478
   },
   "courage": {
     "found": true,
     "token_index": 11917,
     "token_string": " courage",
-    "norm": 3.6309
+    "norm": 3.3786
   },
   "bravery": {
     "found": true,
     "token_index": 37808,
     "token_string": " bravery",
-    "norm": 3.7268
+    "norm": 3.4362
   },
   "wisdom": {
     "found": true,
     "token_index": 11501,
     "token_string": " wisdom",
-    "norm": 3.8586
+    "norm": 3.4031
   },
   "humility": {
     "found": true,
     "token_index": 34935,
     "token_string": " humility",
-    "norm": 3.9043
+    "norm": 3.5158
   },
   "loyalty": {
     "found": true,
     "token_index": 15843,
     "token_string": " loyalty",
-    "norm": 3.7528
+    "norm": 3.4541
   },
   "responsibility": {
     "found": true,
     "token_index": 5798,
     "token_string": " responsibility",
-    "norm": 3.6851
+    "norm": 3.2427
   },
   "resilience": {
     "found": true,
     "token_index": 31307,
     "token_string": " resilience",
-    "norm": 3.8422
+    "norm": 3.4339
   },
   "openness": {
     "found": true,
     "token_index": 30913,
     "token_string": " openness",
-    "norm": 3.8388
+    "norm": 3.5525
   },
   "creativity": {
     "found": true,
     "token_index": 16389,
     "token_string": " creativity",
-    "norm": 3.4824
+    "norm": 3.2788
   },
   "innovation": {
     "found": true,
     "token_index": 11044,
     "token_string": " innovation",
-    "norm": 3.398
+    "norm": 3.1466
   },
   "efficiency": {
     "found": true,
     "token_index": 45888,
     "token_string": "efficiency",
-    "norm": 4.2505
+    "norm": 4.0734
   },
   "tradition": {
     "found": true,
     "token_index": 6761,
     "token_string": " tradition",
-    "norm": 3.5619
+    "norm": 3.2369
   },
   "cruelty": {
     "found": true,
     "token_index": 23152,
     "token_string": " cruelty",
-    "norm": 3.7951
+    "norm": 3.4249
   },
   "oppression": {
     "found": true,
     "token_index": 18345,
     "token_string": " oppression",
-    "norm": 3.58
+    "norm": 3.243
   },
   "secrecy": {
     "found": true,
     "token_index": 22780,
     "token_string": " secrecy",
-    "norm": 4.1069
+    "norm": 3.7128
   },
   "truthfulness": {
     "found": false

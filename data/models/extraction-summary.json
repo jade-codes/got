@@ -1,0 +1,11 @@
+[
+  {
+    "name": "tinyllama-base",
+    "hf_name": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+    "vocab_size": 32000,
+    "hidden_dim": 2048,
+    "terms_resolved": 9,
+    "gotue_path": "C:\\Users\\Public\\got\\data\\models\\tinyllama-base.gotue",
+    "gotue_mb": 250.0
+  }
+]
