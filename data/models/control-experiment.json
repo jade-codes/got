@@ -1,0 +1,1079 @@
+{
+  "experiment": "non-value-control",
+  "description": "Comparing value-term geometry against matched non-value control sets",
+  "term_sets": {
+    "values": [
+      "honesty",
+      "integrity",
+      "fairness",
+      "transparency",
+      "accountability",
+      "justice",
+      "freedom",
+      "equality",
+      "equity",
+      "compassion",
+      "empathy",
+      "courage",
+      "bravery",
+      "wisdom",
+      "humility",
+      "loyalty",
+      "responsibility",
+      "resilience",
+      "openness",
+      "creativity",
+      "innovation",
+      "efficiency",
+      "tradition",
+      "cruelty",
+      "oppression",
+      "secrecy"
+    ],
+    "concrete": [
+      "table",
+      "hammer",
+      "river",
+      "mountain",
+      "window",
+      "bicycle",
+      "forest",
+      "bridge",
+      "kitchen",
+      "garden",
+      "bottle",
+      "carpet",
+      "library",
+      "candle",
+      "mirror",
+      "blanket",
+      "fountain",
+      "ladder",
+      "garage",
+      "tunnel",
+      "basket",
+      "curtain",
+      "envelope",
+      "lantern",
+      "notebook",
+      "umbrella"
+    ],
+    "colours": [
+      "red",
+      "blue",
+      "green",
+      "yellow",
+      "orange",
+      "purple",
+      "black",
+      "white",
+      "brown",
+      "pink",
+      "grey",
+      "silver",
+      "golden",
+      "violet",
+      "crimson",
+      "scarlet",
+      "ivory",
+      "bronze",
+      "coral",
+      "amber",
+      "indigo",
+      "turquoise",
+      "maroon",
+      "magenta",
+      "tan",
+      "beige"
+    ],
+    "random": [
+      "several",
+      "although",
+      "perhaps",
+      "already",
+      "another",
+      "between",
+      "through",
+      "without",
+      "against",
+      "during",
+      "before",
+      "because",
+      "however",
+      "whether",
+      "neither",
+      "toward",
+      "beyond",
+      "within",
+      "almost",
+      "always",
+      "enough",
+      "rather",
+      "simply",
+      "around",
+      "indeed",
+      "often"
+    ],
+    "professions": [
+      "doctor",
+      "teacher",
+      "lawyer",
+      "engineer",
+      "artist",
+      "farmer",
+      "soldier",
+      "merchant",
+      "carpenter",
+      "scientist",
+      "musician",
+      "journalist",
+      "librarian",
+      "mechanic",
+      "pilot",
+      "architect",
+      "detective",
+      "surgeon",
+      "translator",
+      "plumber",
+      "electrician",
+      "pharmacist",
+      "accountant",
+      "therapist",
+      "professor",
+      "dentist"
+    ]
+  },
+  "models": {
+    "gpt2": {
+      "model": "gpt2",
+      "hidden_dim": 768,
+      "vocab_size": 50257,
+      "sets": {
+        "values": {
+          "resolved": 4,
+          "total": 26,
+          "pr": 2.989,
+          "pr_normalised": 0.7471,
+          "mean_pairwise_cosine": -0.3324,
+          "spectrum_top5": [
+            1.444,
+            1.311,
+            1.245,
+            0.0
+          ],
+          "mean_kappa": 0.3722,
+          "max_kappa": 0.3795,
+          "std_kappa": 0.008,
+          "median_kappa": 0.3752,
+          "n_triples": 4
+        },
+        "concrete": {
+          "resolved": 7,
+          "total": 26,
+          "pr": 5.893,
+          "pr_normalised": 0.8419,
+          "mean_pairwise_cosine": -0.1653,
+          "spectrum_top5": [
+            1.45,
+            1.254,
+            1.17,
+            1.1,
+            1.076
+          ],
+          "mean_kappa": 0.3461,
+          "max_kappa": 0.3848,
+          "std_kappa": 0.0169,
+          "median_kappa": 0.3471,
+          "n_triples": 35
+        },
+        "colours": {
+          "resolved": 14,
+          "total": 26,
+          "pr": 11.976,
+          "pr_normalised": 0.8554,
+          "mean_pairwise_cosine": -0.0753,
+          "spectrum_top5": [
+            1.794,
+            1.433,
+            1.363,
+            1.288,
+            1.191
+          ],
+          "mean_kappa": 0.3966,
+          "max_kappa": 0.4839,
+          "std_kappa": 0.031,
+          "median_kappa": 0.3948,
+          "n_triples": 364
+        },
+        "random": {
+          "resolved": 25,
+          "total": 26,
+          "pr": 18.646,
+          "pr_normalised": 0.7458,
+          "mean_pairwise_cosine": -0.0409,
+          "spectrum_top5": [
+            2.991,
+            2.129,
+            1.656,
+            1.458,
+            1.336
+          ],
+          "mean_kappa": 0.4419,
+          "max_kappa": 0.588,
+          "std_kappa": 0.0333,
+          "median_kappa": 0.4401,
+          "n_triples": 2300
+        },
+        "professions": {
+          "resolved": 3,
+          "total": 26,
+          "pr": 1.954,
+          "pr_normalised": 0.6513,
+          "mean_pairwise_cosine": -0.4927,
+          "spectrum_top5": [
+            1.73,
+            1.27,
+            0.0
+          ],
+          "mean_kappa": 0.3807,
+          "max_kappa": 0.3807,
+          "std_kappa": 0.0,
+          "median_kappa": 0.3807,
+          "n_triples": 1
+        }
+      }
+    },
+    "gpt2-medium": {
+      "model": "gpt2-medium",
+      "hidden_dim": 1024,
+      "vocab_size": 50257,
+      "sets": {
+        "values": {
+          "resolved": 4,
+          "total": 26,
+          "pr": 2.994,
+          "pr_normalised": 0.7486,
+          "mean_pairwise_cosine": -0.3321,
+          "spectrum_top5": [
+            1.405,
+            1.33,
+            1.265,
+            0.0
+          ],
+          "mean_kappa": 0.4107,
+          "max_kappa": 0.4256,
+          "std_kappa": 0.0106,
+          "median_kappa": 0.4108,
+          "n_triples": 4
+        },
+        "concrete": {
+          "resolved": 7,
+          "total": 26,
+          "pr": 5.92,
+          "pr_normalised": 0.8457,
+          "mean_pairwise_cosine": -0.1655,
+          "spectrum_top5": [
+            1.392,
+            1.262,
+            1.183,
+            1.134,
+            1.052
+          ],
+          "mean_kappa": 0.3763,
+          "max_kappa": 0.4129,
+          "std_kappa": 0.017,
+          "median_kappa": 0.3756,
+          "n_triples": 35
+        },
+        "colours": {
+          "resolved": 14,
+          "total": 26,
+          "pr": 12.138,
+          "pr_normalised": 0.867,
+          "mean_pairwise_cosine": -0.0756,
+          "spectrum_top5": [
+            1.742,
+            1.39,
+            1.343,
+            1.299,
+            1.141
+          ],
+          "mean_kappa": 0.4297,
+          "max_kappa": 0.5251,
+          "std_kappa": 0.0305,
+          "median_kappa": 0.4278,
+          "n_triples": 364
+        },
+        "random": {
+          "resolved": 25,
+          "total": 26,
+          "pr": 19.587,
+          "pr_normalised": 0.7835,
+          "mean_pairwise_cosine": -0.0409,
+          "spectrum_top5": [
+            2.855,
+            1.859,
+            1.562,
+            1.391,
+            1.277
+          ],
+          "mean_kappa": 0.4908,
+          "max_kappa": 0.6474,
+          "std_kappa": 0.0374,
+          "median_kappa": 0.49,
+          "n_triples": 2300
+        },
+        "professions": {
+          "resolved": 3,
+          "total": 26,
+          "pr": 1.963,
+          "pr_normalised": 0.6544,
+          "mean_pairwise_cosine": -0.4939,
+          "spectrum_top5": [
+            1.705,
+            1.295,
+            0.0
+          ],
+          "mean_kappa": 0.4285,
+          "max_kappa": 0.4285,
+          "std_kappa": 0.0,
+          "median_kappa": 0.4285,
+          "n_triples": 1
+        }
+      }
+    },
+    "qwen2.5-0.5b": {
+      "model": "qwen2.5-0.5b",
+      "hidden_dim": 896,
+      "vocab_size": 151936,
+      "sets": {
+        "values": {
+          "resolved": 3,
+          "total": 26,
+          "pr": 1.991,
+          "pr_normalised": 0.6635,
+          "mean_pairwise_cosine": -0.4984,
+          "spectrum_top5": [
+            1.603,
+            1.397,
+            0.0
+          ],
+          "mean_kappa": 3.0571,
+          "max_kappa": 3.0571,
+          "std_kappa": 0.0,
+          "median_kappa": 3.0571,
+          "n_triples": 1
+        },
+        "concrete": {
+          "resolved": 12,
+          "total": 26,
+          "pr": 10.804,
+          "pr_normalised": 0.9004,
+          "mean_pairwise_cosine": -0.0904,
+          "spectrum_top5": [
+            1.353,
+            1.268,
+            1.254,
+            1.127,
+            1.089
+          ],
+          "mean_kappa": 2.878,
+          "max_kappa": 3.2083,
+          "std_kappa": 0.118,
+          "median_kappa": 2.8786,
+          "n_triples": 220
+        },
+        "colours": {
+          "resolved": 15,
+          "total": 26,
+          "pr": 12.899,
+          "pr_normalised": 0.8599,
+          "mean_pairwise_cosine": -0.0704,
+          "spectrum_top5": [
+            1.803,
+            1.571,
+            1.367,
+            1.215,
+            1.154
+          ],
+          "mean_kappa": 3.0476,
+          "max_kappa": 3.6222,
+          "std_kappa": 0.2011,
+          "median_kappa": 3.0382,
+          "n_triples": 455
+        },
+        "random": {
+          "resolved": 25,
+          "total": 26,
+          "pr": 21.456,
+          "pr_normalised": 0.8582,
+          "mean_pairwise_cosine": -0.0413,
+          "spectrum_top5": [
+            2.018,
+            1.943,
+            1.37,
+            1.324,
+            1.299
+          ],
+          "mean_kappa": 3.0429,
+          "max_kappa": 3.6783,
+          "std_kappa": 0.1503,
+          "median_kappa": 3.0254,
+          "n_triples": 2300
+        },
+        "professions": {
+          "resolved": 6,
+          "total": 26,
+          "pr": 4.914,
+          "pr_normalised": 0.819,
+          "mean_pairwise_cosine": -0.1985,
+          "spectrum_top5": [
+            1.456,
+            1.281,
+            1.164,
+            1.109,
+            0.99
+          ],
+          "mean_kappa": 3.1761,
+          "max_kappa": 3.4953,
+          "std_kappa": 0.1474,
+          "median_kappa": 3.1496,
+          "n_triples": 20
+        }
+      }
+    },
+    "qwen2.5-0.5b-instruct": {
+      "model": "qwen2.5-0.5b-instruct",
+      "hidden_dim": 896,
+      "vocab_size": 151936,
+      "sets": {
+        "values": {
+          "resolved": 3,
+          "total": 26,
+          "pr": 1.99,
+          "pr_normalised": 0.6632,
+          "mean_pairwise_cosine": -0.4982,
+          "spectrum_top5": [
+            1.608,
+            1.392,
+            0.0
+          ],
+          "mean_kappa": 3.1233,
+          "max_kappa": 3.1233,
+          "std_kappa": 0.0,
+          "median_kappa": 3.1233,
+          "n_triples": 1
+        },
+        "concrete": {
+          "resolved": 12,
+          "total": 26,
+          "pr": 10.81,
+          "pr_normalised": 0.9009,
+          "mean_pairwise_cosine": -0.0904,
+          "spectrum_top5": [
+            1.348,
+            1.267,
+            1.242,
+            1.124,
+            1.096
+          ],
+          "mean_kappa": 2.9555,
+          "max_kappa": 3.2988,
+          "std_kappa": 0.1234,
+          "median_kappa": 2.9556,
+          "n_triples": 220
+        },
+        "colours": {
+          "resolved": 15,
+          "total": 26,
+          "pr": 12.93,
+          "pr_normalised": 0.862,
+          "mean_pairwise_cosine": -0.0704,
+          "spectrum_top5": [
+            1.795,
+            1.548,
+            1.374,
+            1.217,
+            1.15
+          ],
+          "mean_kappa": 3.1297,
+          "max_kappa": 3.7077,
+          "std_kappa": 0.2038,
+          "median_kappa": 3.1194,
+          "n_triples": 455
+        },
+        "random": {
+          "resolved": 25,
+          "total": 26,
+          "pr": 21.545,
+          "pr_normalised": 0.8618,
+          "mean_pairwise_cosine": -0.0414,
+          "spectrum_top5": [
+            2.015,
+            1.89,
+            1.375,
+            1.33,
+            1.288
+          ],
+          "mean_kappa": 3.1055,
+          "max_kappa": 3.7471,
+          "std_kappa": 0.1466,
+          "median_kappa": 3.0878,
+          "n_triples": 2300
+        },
+        "professions": {
+          "resolved": 6,
+          "total": 26,
+          "pr": 4.916,
+          "pr_normalised": 0.8194,
+          "mean_pairwise_cosine": -0.1986,
+          "spectrum_top5": [
+            1.458,
+            1.281,
+            1.158,
+            1.096,
+            1.007
+          ],
+          "mean_kappa": 3.2589,
+          "max_kappa": 3.5696,
+          "std_kappa": 0.1458,
+          "median_kappa": 3.2334,
+          "n_triples": 20
+        }
+      }
+    },
+    "tinyllama-base": {
+      "model": "tinyllama-base",
+      "hidden_dim": 2048,
+      "vocab_size": 32000,
+      "sets": {
+        "values": {
+          "resolved": 9,
+          "total": 26,
+          "pr": 7.915,
+          "pr_normalised": 0.8795,
+          "mean_pairwise_cosine": -0.1246,
+          "spectrum_top5": [
+            1.3,
+            1.237,
+            1.206,
+            1.178,
+            1.087
+          ],
+          "mean_kappa": 1.2892,
+          "max_kappa": 1.3801,
+          "std_kappa": 0.0399,
+          "median_kappa": 1.2828,
+          "n_triples": 84
+        },
+        "concrete": {
+          "resolved": 12,
+          "total": 26,
+          "pr": 10.874,
+          "pr_normalised": 0.9062,
+          "mean_pairwise_cosine": -0.0902,
+          "spectrum_top5": [
+            1.29,
+            1.238,
+            1.197,
+            1.158,
+            1.126
+          ],
+          "mean_kappa": 1.2033,
+          "max_kappa": 1.346,
+          "std_kappa": 0.0577,
+          "median_kappa": 1.2036,
+          "n_triples": 220
+        },
+        "colours": {
+          "resolved": 13,
+          "total": 26,
+          "pr": 11.366,
+          "pr_normalised": 0.8743,
+          "mean_pairwise_cosine": -0.0827,
+          "spectrum_top5": [
+            1.721,
+            1.338,
+            1.221,
+            1.163,
+            1.114
+          ],
+          "mean_kappa": 1.2841,
+          "max_kappa": 1.4324,
+          "std_kappa": 0.0686,
+          "median_kappa": 1.294,
+          "n_triples": 286
+        },
+        "random": {
+          "resolved": 26,
+          "total": 26,
+          "pr": 22.774,
+          "pr_normalised": 0.8759,
+          "mean_pairwise_cosine": -0.0394,
+          "spectrum_top5": [
+            2.052,
+            1.682,
+            1.613,
+            1.266,
+            1.234
+          ],
+          "mean_kappa": 1.3476,
+          "max_kappa": 1.7406,
+          "std_kappa": 0.0886,
+          "median_kappa": 1.3385,
+          "n_triples": 2600
+        },
+        "professions": {
+          "resolved": 11,
+          "total": 26,
+          "pr": 9.657,
+          "pr_normalised": 0.8779,
+          "mean_pairwise_cosine": -0.0989,
+          "spectrum_top5": [
+            1.521,
+            1.308,
+            1.214,
+            1.171,
+            1.124
+          ],
+          "mean_kappa": 1.3718,
+          "max_kappa": 1.6013,
+          "std_kappa": 0.0762,
+          "median_kappa": 1.3668,
+          "n_triples": 165
+        }
+      }
+    },
+    "tinyllama-chat": {
+      "model": "tinyllama-chat",
+      "hidden_dim": 2048,
+      "vocab_size": 32000,
+      "sets": {
+        "values": {
+          "resolved": 9,
+          "total": 26,
+          "pr": 7.915,
+          "pr_normalised": 0.8795,
+          "mean_pairwise_cosine": -0.1246,
+          "spectrum_top5": [
+            1.3,
+            1.237,
+            1.206,
+            1.177,
+            1.089
+          ],
+          "mean_kappa": 1.2895,
+          "max_kappa": 1.3825,
+          "std_kappa": 0.0404,
+          "median_kappa": 1.2828,
+          "n_triples": 84
+        },
+        "concrete": {
+          "resolved": 12,
+          "total": 26,
+          "pr": 10.874,
+          "pr_normalised": 0.9062,
+          "mean_pairwise_cosine": -0.0903,
+          "spectrum_top5": [
+            1.291,
+            1.237,
+            1.197,
+            1.158,
+            1.127
+          ],
+          "mean_kappa": 1.2024,
+          "max_kappa": 1.3434,
+          "std_kappa": 0.0573,
+          "median_kappa": 1.2029,
+          "n_triples": 220
+        },
+        "colours": {
+          "resolved": 13,
+          "total": 26,
+          "pr": 11.367,
+          "pr_normalised": 0.8744,
+          "mean_pairwise_cosine": -0.0827,
+          "spectrum_top5": [
+            1.721,
+            1.338,
+            1.223,
+            1.162,
+            1.113
+          ],
+          "mean_kappa": 1.2831,
+          "max_kappa": 1.431,
+          "std_kappa": 0.0679,
+          "median_kappa": 1.2932,
+          "n_triples": 286
+        },
+        "random": {
+          "resolved": 26,
+          "total": 26,
+          "pr": 22.793,
+          "pr_normalised": 0.8766,
+          "mean_pairwise_cosine": -0.0394,
+          "spectrum_top5": [
+            2.048,
+            1.676,
+            1.61,
+            1.268,
+            1.233
+          ],
+          "mean_kappa": 1.3451,
+          "max_kappa": 1.7341,
+          "std_kappa": 0.0883,
+          "median_kappa": 1.3365,
+          "n_triples": 2600
+        },
+        "professions": {
+          "resolved": 11,
+          "total": 26,
+          "pr": 9.657,
+          "pr_normalised": 0.8779,
+          "mean_pairwise_cosine": -0.0989,
+          "spectrum_top5": [
+            1.521,
+            1.31,
+            1.211,
+            1.17,
+            1.124
+          ],
+          "mean_kappa": 1.3713,
+          "max_kappa": 1.6012,
+          "std_kappa": 0.0767,
+          "median_kappa": 1.3655,
+          "n_triples": 165
+        }
+      }
+    },
+    "stablelm-base": {
+      "model": "stablelm-base",
+      "hidden_dim": 4096,
+      "vocab_size": 50688,
+      "sets": {
+        "values": {
+          "resolved": 2,
+          "total": 26,
+          "skipped": true
+        },
+        "concrete": {
+          "resolved": 8,
+          "total": 26,
+          "pr": 6.963,
+          "pr_normalised": 0.8704,
+          "mean_pairwise_cosine": -0.1423,
+          "spectrum_top5": [
+            1.256,
+            1.241,
+            1.175,
+            1.156,
+            1.101
+          ],
+          "mean_kappa": 1.1187,
+          "max_kappa": 1.1989,
+          "std_kappa": 0.0367,
+          "median_kappa": 1.1132,
+          "n_triples": 56
+        },
+        "colours": {
+          "resolved": 13,
+          "total": 26,
+          "pr": 11.603,
+          "pr_normalised": 0.8925,
+          "mean_pairwise_cosine": -0.0827,
+          "spectrum_top5": [
+            1.612,
+            1.283,
+            1.23,
+            1.094,
+            1.072
+          ],
+          "mean_kappa": 1.1789,
+          "max_kappa": 1.3804,
+          "std_kappa": 0.053,
+          "median_kappa": 1.1737,
+          "n_triples": 286
+        },
+        "random": {
+          "resolved": 24,
+          "total": 26,
+          "pr": 21.925,
+          "pr_normalised": 0.9135,
+          "mean_pairwise_cosine": -0.0433,
+          "spectrum_top5": [
+            1.824,
+            1.451,
+            1.277,
+            1.222,
+            1.163
+          ],
+          "mean_kappa": 1.1434,
+          "max_kappa": 1.3056,
+          "std_kappa": 0.0428,
+          "median_kappa": 1.1423,
+          "n_triples": 2024
+        },
+        "professions": {
+          "resolved": 2,
+          "total": 26,
+          "skipped": true
+        }
+      }
+    },
+    "stablelm-tuned": {
+      "model": "stablelm-tuned",
+      "hidden_dim": 4096,
+      "vocab_size": 50688,
+      "sets": {
+        "values": {
+          "resolved": 2,
+          "total": 26,
+          "skipped": true
+        },
+        "concrete": {
+          "resolved": 8,
+          "total": 26,
+          "pr": 6.966,
+          "pr_normalised": 0.8708,
+          "mean_pairwise_cosine": -0.1424,
+          "spectrum_top5": [
+            1.249,
+            1.237,
+            1.175,
+            1.153,
+            1.11
+          ],
+          "mean_kappa": 1.1182,
+          "max_kappa": 1.1965,
+          "std_kappa": 0.0351,
+          "median_kappa": 1.1128,
+          "n_triples": 56
+        },
+        "colours": {
+          "resolved": 13,
+          "total": 26,
+          "pr": 11.633,
+          "pr_normalised": 0.8948,
+          "mean_pairwise_cosine": -0.0828,
+          "spectrum_top5": [
+            1.581,
+            1.286,
+            1.232,
+            1.097,
+            1.073
+          ],
+          "mean_kappa": 1.1802,
+          "max_kappa": 1.3766,
+          "std_kappa": 0.0522,
+          "median_kappa": 1.1777,
+          "n_triples": 286
+        },
+        "random": {
+          "resolved": 24,
+          "total": 26,
+          "pr": 22.039,
+          "pr_normalised": 0.9183,
+          "mean_pairwise_cosine": -0.0433,
+          "spectrum_top5": [
+            1.751,
+            1.437,
+            1.271,
+            1.228,
+            1.164
+          ],
+          "mean_kappa": 1.1421,
+          "max_kappa": 1.3039,
+          "std_kappa": 0.0422,
+          "median_kappa": 1.141,
+          "n_triples": 2024
+        },
+        "professions": {
+          "resolved": 2,
+          "total": 26,
+          "skipped": true
+        }
+      }
+    }
+  },
+  "tuning_comparisons": {
+    "qwen2.5-0.5b_vs_qwen2.5-0.5b-instruct": {
+      "method": "SFT",
+      "sets": {
+        "values": {
+          "shared": 3,
+          "base_pr": 1.991,
+          "tuned_pr": 1.99,
+          "pr_delta": -0.0009,
+          "frobenius": 0.0139,
+          "mean_drift": 0.993316,
+          "min_drift": 0.991254,
+          "base_mean_kappa": 3.0571,
+          "tuned_mean_kappa": 3.1233,
+          "kappa_delta": 0.0662
+        },
+        "concrete": {
+          "shared": 12,
+          "base_pr": 10.804,
+          "tuned_pr": 10.81,
+          "pr_delta": 0.0059,
+          "frobenius": 0.0711,
+          "mean_drift": 0.994744,
+          "min_drift": 0.992771,
+          "base_mean_kappa": 2.878,
+          "tuned_mean_kappa": 2.9555,
+          "kappa_delta": 0.0775
+        },
+        "colours": {
+          "shared": 15,
+          "base_pr": 12.899,
+          "tuned_pr": 12.93,
+          "pr_delta": 0.0317,
+          "frobenius": 0.0772,
+          "mean_drift": 0.994222,
+          "min_drift": 0.991534,
+          "base_mean_kappa": 3.0476,
+          "tuned_mean_kappa": 3.1297,
+          "kappa_delta": 0.0821
+        },
+        "random": {
+          "shared": 25,
+          "base_pr": 21.456,
+          "tuned_pr": 21.545,
+          "pr_delta": 0.089,
+          "frobenius": 0.1317,
+          "mean_drift": 0.994693,
+          "min_drift": 0.990404,
+          "base_mean_kappa": 3.0429,
+          "tuned_mean_kappa": 3.1055,
+          "kappa_delta": 0.0626
+        },
+        "professions": {
+          "shared": 6,
+          "base_pr": 4.914,
+          "tuned_pr": 4.916,
+          "pr_delta": 0.0021,
+          "frobenius": 0.0348,
+          "mean_drift": 0.994355,
+          "min_drift": 0.993011,
+          "base_mean_kappa": 3.1761,
+          "tuned_mean_kappa": 3.2589,
+          "kappa_delta": 0.0828
+        }
+      }
+    },
+    "tinyllama-base_vs_tinyllama-chat": {
+      "method": "SFT+DPO",
+      "sets": {
+        "values": {
+          "shared": 9,
+          "base_pr": 7.915,
+          "tuned_pr": 7.915,
+          "pr_delta": 0.0003,
+          "frobenius": 0.009,
+          "mean_drift": 0.999837,
+          "min_drift": 0.999785,
+          "base_mean_kappa": 1.2892,
+          "tuned_mean_kappa": 1.2895,
+          "kappa_delta": 0.0003
+        },
+        "concrete": {
+          "shared": 12,
+          "base_pr": 10.874,
+          "tuned_pr": 10.874,
+          "pr_delta": -0.0003,
+          "frobenius": 0.0074,
+          "mean_drift": 0.999833,
+          "min_drift": 0.99913,
+          "base_mean_kappa": 1.2033,
+          "tuned_mean_kappa": 1.2024,
+          "kappa_delta": -0.0009
+        },
+        "colours": {
+          "shared": 13,
+          "base_pr": 11.366,
+          "tuned_pr": 11.367,
+          "pr_delta": 0.0004,
+          "frobenius": 0.0096,
+          "mean_drift": 0.999874,
+          "min_drift": 0.999642,
+          "base_mean_kappa": 1.2841,
+          "tuned_mean_kappa": 1.2831,
+          "kappa_delta": -0.001
+        },
+        "random": {
+          "shared": 26,
+          "base_pr": 22.774,
+          "tuned_pr": 22.793,
+          "pr_delta": 0.0187,
+          "frobenius": 0.0346,
+          "mean_drift": 0.999733,
+          "min_drift": 0.999246,
+          "base_mean_kappa": 1.3476,
+          "tuned_mean_kappa": 1.3451,
+          "kappa_delta": -0.0024
+        },
+        "professions": {
+          "shared": 11,
+          "base_pr": 9.657,
+          "tuned_pr": 9.657,
+          "pr_delta": -0.0001,
+          "frobenius": 0.0089,
+          "mean_drift": 0.999857,
+          "min_drift": 0.999794,
+          "base_mean_kappa": 1.3718,
+          "tuned_mean_kappa": 1.3713,
+          "kappa_delta": -0.0005
+        }
+      }
+    },
+    "stablelm-base_vs_stablelm-tuned": {
+      "method": "PPO-RLHF",
+      "sets": {
+        "values": {
+          "shared": 2,
+          "skipped": true
+        },
+        "concrete": {
+          "shared": 8,
+          "base_pr": 6.963,
+          "tuned_pr": 6.966,
+          "pr_delta": 0.0031,
+          "frobenius": 0.0226,
+          "mean_drift": 0.997307,
+          "min_drift": 0.996101,
+          "base_mean_kappa": 1.1187,
+          "tuned_mean_kappa": 1.1182,
+          "kappa_delta": -0.0005
+        },
+        "colours": {
+          "shared": 13,
+          "base_pr": 11.603,
+          "tuned_pr": 11.633,
+          "pr_delta": 0.0296,
+          "frobenius": 0.0499,
+          "mean_drift": 0.997176,
+          "min_drift": 0.996199,
+          "base_mean_kappa": 1.1789,
+          "tuned_mean_kappa": 1.1802,
+          "kappa_delta": 0.0013
+        },
+        "random": {
+          "shared": 24,
+          "base_pr": 21.925,
+          "tuned_pr": 22.039,
+          "pr_delta": 0.1146,
+          "frobenius": 0.1105,
+          "mean_drift": 0.996769,
+          "min_drift": 0.995467,
+          "base_mean_kappa": 1.1434,
+          "tuned_mean_kappa": 1.1421,
+          "kappa_delta": -0.0013
+        },
+        "professions": {
+          "shared": 2,
+          "skipped": true
+        }
+      }
+    }
+  }
+}
