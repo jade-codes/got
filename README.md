@@ -59,7 +59,7 @@ got-web                        Layer 5b — Unified web UI with LLM chat + value
 | `got-wire` | Framed wire protocol, exchange envelopes, chain verification, trust registry, PKI certificates, CRL, behavioral exchange protocol |
 | `got-store` | Attestation persistence (in-memory and on-disk with atomic writes), audit reports |
 | `got-enclave` | TEE abstraction — signing keys never leave the enclave boundary (software mock for PoC) |
-| `got-incoherence` | Zero-training coherence analysis: pairwise causal cosines, contradiction/redundancy detection, SVG heatmap and chord diagram generation |
+| `got-incoherence` | Zero-training coherence analysis: pairwise causal cosines, contradiction/redundancy detection, effective dimensionality (participation ratio), model comparison, Menger curvature analysis, SVG heatmap and chord diagram generation |
 | `got-proxy` | **Proxy architecture for closed-source models**: behavioral value space (Welford + EWMA), absolute cosine value detection, 4-signal deviation detection (term shift, profile drift, pairwise disruption, manifold density), Ed25519 behavioral attestations with manifold density/curvature readings, memory/file storage |
 | `got-cli` | CLI with `keygen`, `train`, `attest`, `verify`, `checkpoint`, `drift`, `calibration-report`, `issue-cert`, `revoke-cert`, `rotate-key`, `coherence-check`, `coherence`, `collapse-report`, `compare` subcommands |
 | `got-web` | Axum web server with unified D3.js frontend: LLM chat with activation server sidecar for real residual stream embeddings, live value monitoring via proxy, real Φ = UᵀU geometry, configurable value taxonomy (`--values`), 11 visualization tabs in 3 groups (Live: values/deviation/coherence, Pairwise: contradictions/redundancies/chord/heatmap, Geometry: sphere/manifold/collapse/compare) |
@@ -376,6 +376,29 @@ The UI has 11 analysis tabs in 3 groups:
 | `POST` | `/api/proxy/session/:id/manifold` | Compute manifold geometry + signed behavioral attestation (density, curvature, per-term densities) |
 | `POST` | `/api/proxy/session/:id/snapshot` | Force snapshot + signed behavioral attestation |
 
+### Model Comparison
+
+Compare value geometry across models to measure how scaling, instruction tuning, or RLHF affects the structure of value-relevant directions.
+
+```bash
+# Extract unembedding matrices from multiple models
+python scripts/extract_models.py --models gpt2 gpt2-medium qwen2.5-0.5b qwen2.5-0.5b-instruct
+
+# Compare all available model pairs
+python scripts/compare_models.py --all
+
+# Compare a specific pair
+python scripts/compare_models.py --pair qwen2.5-0.5b qwen2.5-0.5b-instruct
+```
+
+The comparison computes:
+- **Effective dimensionality** (participation ratio) — how many independent directions the value terms span
+- **Per-term embedding drift** — cosine similarity of each value term's embedding between models
+- **Pairwise relationship changes** — which value-pair relationships shifted most
+- **Cosine matrix Frobenius distance** — overall structural change
+
+Preliminary results across 6 models (GPT-2, GPT-2 Medium, Qwen2.5-0.5B base/instruct, TinyLlama base/chat) show that instruction tuning does not collapse value geometry in the unembedding matrix — per-term cosine similarity exceeds 0.99 for all terms. See [PRODUCTION.md](PRODUCTION.md) for full results and implications.
+
 ## Trust Tiers
 
 The attestation schema supports four progressive levels of trust:
@@ -437,6 +460,8 @@ The `scripts/` directory contains tools for model activation extraction and anal
 | `test_real_api.py` | End-to-end API tests with real model data |
 | `test_real_models.py` | Test against real model weights |
 | `test_zscore.py` | Test z-score thresholding for value detection |
+| `extract_models.py` | Batch extraction of unembedding matrices from multiple HuggingFace models |
+| `compare_models.py` | Compare value geometry across models: participation ratio, per-term drift, relationship changes |
 
 See [scripts/README.md](scripts/README.md) for activation extraction details and binary format specs.
 
@@ -477,6 +502,7 @@ Those are the hard problems. This is the plumbing that proves the hard problems 
 - **390+ tests** (unit + integration) | **0 new compiler warnings**
 - **23 Python scripts** for model extraction, SAE training, experiments, and activation serving
 - **14 static frontend files** (modular ES modules + CSS)
+- **8 models extracted** across 4 experiments (GPT-2, GPT-2 Medium, Qwen2.5-0.5B base/instruct, TinyLlama base/chat, StableLM base/tuned)
 - **12/12 security issues mitigated** (critical and high severity)
 - **Real model validated**: Qwen3.5:9b with Φ = UᵀU geometry (248K vocab x 4096d)
 
