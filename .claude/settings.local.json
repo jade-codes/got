@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/c/Users/jade_/AppData/Local/Programs/Python/Python312/python.exe -c \"\nimport json\npath = 'C:/Users/jade_/.cache/huggingface/hub/models--stabilityai--stablelm-tuned-alpha-3b/snapshots/d1c03d2114451d562416b9efe4281d319ceff99e/pytorch_model.bin.index.json'\nwith open\\(path\\) as f:\n    idx = json.load\\(f\\)\nfor k, v in idx['weight_map'].items\\(\\):\n    if 'layers.15' in k or 'embed_out' in k or 'final_layer_norm' in k or 'embed_in' in k:\n        print\\(f'{k} -> {v}'\\)\n\" 2>&1)",
+      "Bash(python:*)"
+    ]
+  }
+}
