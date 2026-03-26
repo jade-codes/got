@@ -102,6 +102,15 @@ pub struct CoherenceAnalysis {
     pub num_terms: usize,
     /// Number of terms that could not be embedded (for reference).
     pub num_unresolved: usize,
+    /// Effective dimensionality of the value subspace (participation ratio).
+    ///
+    /// PR = (Σλ_i)² / Σλ_i²  where λ_i are eigenvalues of the n×n cosine matrix.
+    /// PR = 1 means all values collapsed to one direction.
+    /// PR = n means values span n independent directions.
+    pub effective_dimensionality: f32,
+    /// Sorted eigenvalues of the pairwise cosine matrix (descending).
+    /// Useful for visualising the spectrum and detecting collapse.
+    pub eigenspectrum: Vec<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +312,63 @@ pub fn coherence_score(
     ((1.0 - max_severity) * (1.0 - contradiction_ratio)).clamp(0.0, 1.0)
 }
 
+/// Compute the participation ratio (effective dimensionality) from pairwise cosines.
+///
+/// Builds the n×n cosine matrix C where C[i][j] = causal_cosine(v_i, v_j),
+/// computes its eigenvalues, and returns:
+///   PR = (Σλ_i)² / Σλ_i²
+///
+/// PR ∈ [1, n]:
+///   - PR ≈ 1: all values collapsed onto a single direction (manifold collapse)
+///   - PR ≈ n: values span n independent directions (rich structure)
+///
+/// Also returns the sorted eigenspectrum (descending) for visualisation.
+pub fn participation_ratio(
+    values: &[ResolvedValue],
+    geometry: &CausalGeometry,
+) -> Result<(f32, Vec<f32>), IncoherenceError> {
+    let n = values.len();
+    if n < 2 {
+        return Ok((1.0, vec![1.0]));
+    }
+
+    // Build n×n cosine matrix
+    let mut cosine_matrix = faer::Mat::zeros(n, n);
+    for i in 0..n {
+        cosine_matrix[(i, i)] = 1.0; // self-similarity
+        for j in (i + 1)..n {
+            let cos = causal_cosine(
+                &values[i].embedding,
+                &values[j].embedding,
+                geometry,
+            )?;
+            cosine_matrix[(i, j)] = cos as f64;
+            cosine_matrix[(j, i)] = cos as f64;
+        }
+    }
+
+    // Eigendecomposition of symmetric matrix
+    let eigenvalues = cosine_matrix.selfadjoint_eigendecomposition(faer::Side::Lower).s().column_vector().try_as_slice().unwrap().to_vec();
+
+    // Clamp negative eigenvalues to zero (numerical noise)
+    let lambdas: Vec<f64> = eigenvalues.iter().map(|&v| v.max(0.0)).collect();
+
+    let sum: f64 = lambdas.iter().sum();
+    let sum_sq: f64 = lambdas.iter().map(|l| l * l).sum();
+
+    let pr = if sum_sq > 1e-15 {
+        (sum * sum / sum_sq) as f32
+    } else {
+        1.0
+    };
+
+    // Return sorted descending eigenspectrum
+    let mut spectrum: Vec<f32> = lambdas.iter().map(|&l| l as f32).collect();
+    spectrum.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok((pr, spectrum))
+}
+
 /// Run the full coherence analysis.
 pub fn analyse(
     values: &[ResolvedValue],
@@ -320,6 +386,7 @@ pub fn analyse(
     let contradictions = find_contradictions(&pairwise, config);
     let redundancies = find_redundancies(&pairwise, config);
     let score = coherence_score(&pairwise, &contradictions);
+    let (eff_dim, eigenspectrum) = participation_ratio(values, geometry)?;
 
     Ok(CoherenceAnalysis {
         pairwise,
@@ -328,6 +395,8 @@ pub fn analyse(
         coherence_score: score,
         num_terms: values.len(),
         num_unresolved,
+        effective_dimensionality: eff_dim,
+        eigenspectrum,
     })
 }
 

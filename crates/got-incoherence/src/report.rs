@@ -295,6 +295,8 @@ mod tests {
             coherence_score: 0.77,
             num_terms: 3,
             num_unresolved: 0,
+            effective_dimensionality: 2.5,
+            eigenspectrum: vec![1.5, 0.8, 0.2],
         }
     }
 
@@ -345,6 +347,8 @@ mod tests {
             coherence_score: 1.0,
             num_terms: 3,
             num_unresolved: 0,
+            effective_dimensionality: 3.0,
+            eigenspectrum: vec![1.0, 1.0, 1.0],
         };
         let report = render_text(&analysis);
         assert!(report.contains("none detected"));

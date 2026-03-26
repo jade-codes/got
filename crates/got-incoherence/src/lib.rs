@@ -19,7 +19,10 @@
 //   println!("{}", report::render_text(&report.analysis));
 // ---------------------------------------------------------------------------
 
+pub mod category;
 pub mod coherence;
+pub mod compare;
+pub mod curvature;
 pub mod embeddings;
 pub mod report;
 pub mod visual;

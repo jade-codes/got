@@ -657,6 +657,8 @@ mod tests {
             coherence_score: 0.72,
             num_terms: 3,
             num_unresolved: 0,
+            effective_dimensionality: 2.8,
+            eigenspectrum: vec![1.2, 0.9, 0.4],
         }
     }
 
@@ -688,6 +690,8 @@ mod tests {
             coherence_score: 1.0,
             num_terms: 0,
             num_unresolved: 0,
+            effective_dimensionality: 0.0,
+            eigenspectrum: vec![],
         };
         let svg = render_heatmap(&empty);
         assert!(svg.contains("No terms"));

@@ -1025,6 +1025,7 @@ dependencies = [
 name = "got-incoherence"
 version = "0.1.0"
 dependencies = [
+ "faer",
  "got-core",
  "serde",
  "serde_json",
