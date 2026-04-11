@@ -8,6 +8,8 @@
 // by high probe readings or governance dispensation.
 // ---------------------------------------------------------------------------
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 
 use got_core::{DomainScopeDeclaration, InteractionModeTag, PermittedDomainDeclaration};
@@ -100,6 +102,37 @@ impl DomainPattern {
         }
     }
 
+    /// Does `self` (treated as an exclusion pattern) subsume `other`
+    /// (treated as a permission pattern)?  That is: is every domain
+    /// matched by `other` also matched by `self`?
+    ///
+    /// Used by `DomainScope::validate()` to detect dead permissions,
+    /// e.g. `permit transport.*` alongside `exclude transport.*`, or
+    /// `permit transport.trucks` alongside `exclude transport.*`.
+    /// A narrower exclusion (e.g. `exclude transport.autonomous-vehicle`
+    /// against `permit transport.*`) is **not** subsumption — the rest
+    /// of the transport sub-tree is still permitted, which is a
+    /// legitimate "allow-with-carveout" configuration.
+    pub fn subsumes(&self, other: &DomainPattern) -> bool {
+        if !self.wildcard {
+            // Exact exclusion only subsumes an exact permission of the same value.
+            return !other.wildcard && self.prefix == other.prefix;
+        }
+        if self.prefix.is_empty() {
+            // Global wildcard subsumes everything.
+            return true;
+        }
+        // Non-global wildcard `self` = "x.*": subsumes `other` only when every
+        // domain other matches is inside the x sub-tree.  A global-wildcard
+        // `other` matches domains outside x.* too, so it is never subsumed.
+        if other.wildcard && other.prefix.is_empty() {
+            return false;
+        }
+        let other_prefix = &other.prefix;
+        other_prefix == &self.prefix
+            || other_prefix.starts_with(&format!("{}.", self.prefix))
+    }
+
     /// Canonical string form for serialisation.
     /// Exact: "agriculture.crop-management"; wildcard: "agriculture.*";
     /// global wildcard: "*".
@@ -182,6 +215,76 @@ pub struct DomainScope {
 }
 
 impl DomainScope {
+    /// Validate the internal consistency of this scope.  Catches the
+    /// configuration mistakes the type system and parser do not:
+    ///
+    /// 1. **Duplicate permitted patterns** — two entries with the same
+    ///    canonical pattern are ambiguous (which mode wins a tie-broken
+    ///    lookup?) and almost always a config typo.
+    /// 2. **Duplicate exclusion patterns** — redundant and confusing;
+    ///    reject to force the author to collapse them.
+    /// 3. **Exclusion subsumes permission** — e.g. `permit transport.*`
+    ///    alongside `exclude transport.*` (exact match) or
+    ///    `permit transport.trucks` alongside `exclude transport.*`
+    ///    (the permission is dead code because exclusion runs first in
+    ///    `check_domain_compatibility`).  Narrower exclusions that
+    ///    carve out part of a broader permission (e.g.
+    ///    `permit transport.*` + `exclude transport.autonomous-vehicle`)
+    ///    are **not** flagged — they are a legitimate
+    ///    "allow-with-carveout" configuration.
+    ///
+    /// Run this at registry load time (see `parse_domain_scope` in
+    /// `got-wire::registry`).  An empty `permitted` list is allowed: a
+    /// scope with no permitted peers describes an observer-only agent
+    /// that refuses all inbound cooperation.
+    pub fn validate(&self) -> Result<(), WireError> {
+        // 1. Duplicate permitted patterns — O(n) via HashSet.
+        //    DomainPattern derives Hash + Eq so we can hash borrows.
+        let mut seen_permit = HashSet::with_capacity(self.permitted.len());
+        for entry in &self.permitted {
+            if !seen_permit.insert(&entry.pattern) {
+                return Err(WireError::DomainScopeInvalid(format!(
+                    "duplicate permitted pattern {:?} in scope for {}",
+                    entry.pattern.canonical(),
+                    self.primary.as_str()
+                )));
+            }
+        }
+
+        // 2. Duplicate exclusion patterns — O(n) via HashSet.
+        let mut seen_excl = HashSet::with_capacity(self.exclusions.len());
+        for excl in &self.exclusions {
+            if !seen_excl.insert(excl) {
+                return Err(WireError::DomainScopeInvalid(format!(
+                    "duplicate exclusion pattern {:?} in scope for {}",
+                    excl.canonical(),
+                    self.primary.as_str()
+                )));
+            }
+        }
+
+        // 3. Dead permissions: any exclusion that subsumes a permission.
+        //    Subsumption is a structural pairwise relation (not equality),
+        //    so hashing doesn't help — this stays O(permits × exclusions).
+        //    Scopes are curated by humans and realistically hold a handful
+        //    of entries, so O(p × e) is fine.
+        for permit in &self.permitted {
+            for excl in &self.exclusions {
+                if excl.subsumes(&permit.pattern) {
+                    return Err(WireError::DomainScopeInvalid(format!(
+                        "exclusion {:?} subsumes permitted pattern {:?} in scope for {} \
+                         (the permission is dead code because exclusions take precedence)",
+                        excl.canonical(),
+                        permit.pattern.canonical(),
+                        self.primary.as_str()
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Serialise this scope into the wire-level declaration that travels
     /// inside a signed attestation (§2.1).  String-based for stability.
     pub fn to_declaration(&self) -> DomainScopeDeclaration {
@@ -453,6 +556,164 @@ mod tests {
         a.permitted[0].mode = InteractionMode::ReadOnly;
         let err = check_domain_compatibility(&a, &drug_scope()).unwrap_err();
         assert!(matches!(err, WireError::DomainModeIncompatible { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Validator: DomainPattern::subsumes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn global_wildcard_subsumes_everything() {
+        let global = p("*");
+        assert!(global.subsumes(&p("transport.*")));
+        assert!(global.subsumes(&p("agriculture.crop-management")));
+        assert!(global.subsumes(&p("*")));
+    }
+
+    #[test]
+    fn subtree_wildcard_subsumes_descendants() {
+        let trans = p("transport.*");
+        assert!(trans.subsumes(&p("transport.*")));
+        assert!(trans.subsumes(&p("transport.autonomous-vehicle")));
+        assert!(trans.subsumes(&p("transport.logistics.*")));
+        assert!(!trans.subsumes(&p("agriculture.*")));
+        assert!(!trans.subsumes(&p("transport-adjacent")));
+        assert!(!trans.subsumes(&p("*"))); // narrower can't subsume global
+    }
+
+    #[test]
+    fn exact_pattern_only_subsumes_itself() {
+        let exact = p("transport.autonomous-vehicle");
+        assert!(exact.subsumes(&p("transport.autonomous-vehicle")));
+        assert!(!exact.subsumes(&p("transport.*")));
+        assert!(!exact.subsumes(&p("transport.autonomous-vehicle.truck")));
+    }
+
+    // -----------------------------------------------------------------------
+    // Validator: DomainScope::validate
+    // -----------------------------------------------------------------------
+
+    fn scope(
+        primary: &str,
+        permitted: &[(&str, InteractionMode)],
+        exclusions: &[&str],
+    ) -> DomainScope {
+        DomainScope {
+            primary: d(primary),
+            permitted: permitted
+                .iter()
+                .map(|(pat, mode)| PermittedDomain {
+                    pattern: p(pat),
+                    mode: *mode,
+                })
+                .collect(),
+            exclusions: exclusions.iter().map(|s| p(s)).collect(),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_scope() {
+        let s = scope(
+            "agriculture.crop-management",
+            &[
+                ("agriculture.*", InteractionMode::Cooperative),
+                ("meteorology.*", InteractionMode::Advisory),
+            ],
+            &["transport.*"],
+        );
+        s.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_accepts_empty_permitted_list() {
+        // Observer-only agent: refuses all inbound cooperation.
+        let s = scope("healthcare.auditor", &[], &[]);
+        s.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_allows_narrower_exclusion_carveout() {
+        // Legitimate "allow all transport except autonomous-vehicle".
+        let s = scope(
+            "transport.dispatcher",
+            &[("transport.*", InteractionMode::Cooperative)],
+            &["transport.autonomous-vehicle"],
+        );
+        s.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_permitted_patterns() {
+        let s = scope(
+            "agriculture.crop-management",
+            &[
+                ("agriculture.*", InteractionMode::Cooperative),
+                ("agriculture.*", InteractionMode::ReadOnly),
+            ],
+            &[],
+        );
+        let err = s.validate().unwrap_err();
+        assert!(
+            matches!(err, WireError::DomainScopeInvalid(ref m) if m.contains("duplicate permitted")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_exclusion_patterns() {
+        let s = scope(
+            "agriculture.crop-management",
+            &[("agriculture.*", InteractionMode::Cooperative)],
+            &["transport.*", "transport.*"],
+        );
+        let err = s.validate().unwrap_err();
+        assert!(
+            matches!(err, WireError::DomainScopeInvalid(ref m) if m.contains("duplicate exclusion")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_exact_exclusion_shadowing_permission() {
+        let s = scope(
+            "agriculture.crop-management",
+            &[("transport.*", InteractionMode::Cooperative)],
+            &["transport.*"],
+        );
+        let err = s.validate().unwrap_err();
+        assert!(
+            matches!(err, WireError::DomainScopeInvalid(ref m) if m.contains("subsumes")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_wildcard_exclusion_shadowing_narrower_permission() {
+        // permit transport.trucks + exclude transport.* → permission is dead
+        let s = scope(
+            "agriculture.crop-management",
+            &[("transport.trucks", InteractionMode::Cooperative)],
+            &["transport.*"],
+        );
+        let err = s.validate().unwrap_err();
+        assert!(
+            matches!(err, WireError::DomainScopeInvalid(ref m) if m.contains("subsumes")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_global_exclusion_with_any_permission() {
+        let s = scope(
+            "agriculture.crop-management",
+            &[("agriculture.*", InteractionMode::Cooperative)],
+            &["*"],
+        );
+        let err = s.validate().unwrap_err();
+        assert!(
+            matches!(err, WireError::DomainScopeInvalid(ref m) if m.contains("subsumes")),
+            "{err:?}"
+        );
     }
 
     #[test]

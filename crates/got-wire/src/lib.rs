@@ -86,6 +86,8 @@ pub enum WireError {
     DomainNotPermitted { from: String, target: String },
     #[error("interaction modes incompatible: {a} vs {b}")]
     DomainModeIncompatible { a: String, b: String },
+    #[error("domain scope configuration invalid: {0}")]
+    DomainScopeInvalid(String),
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("io error: {0}")]

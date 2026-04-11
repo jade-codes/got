@@ -15,6 +15,8 @@
 // how every pre-§4 registry worked.
 // ---------------------------------------------------------------------------
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 
 use crate::domain::{Domain, DomainPattern};
@@ -79,6 +81,24 @@ pub struct GovernanceTable {
 impl GovernanceTable {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Validate that the table has no exact-duplicate patterns.  Two
+    /// entries with the same canonical pattern are ambiguous (which
+    /// thresholds win?) and almost always a config typo.  Overlapping
+    /// patterns with *different* specificity are fine — the most
+    /// specific one wins in `lookup`.
+    pub fn validate(&self, agent_id: &str) -> Result<(), WireError> {
+        let mut seen = HashSet::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            if !seen.insert(&entry.pattern) {
+                return Err(WireError::DomainScopeInvalid(format!(
+                    "agent {agent_id}: duplicate governance_thresholds pattern {:?}",
+                    entry.pattern.canonical()
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Find the most-specific policy that applies to `peer_domain`.
@@ -214,6 +234,44 @@ mod tests {
             require_causal_validation: false,
         };
         assert!(row.into_entry("alice").is_err());
+    }
+
+    #[test]
+    fn validate_accepts_non_duplicate_patterns() {
+        let table = GovernanceTable {
+            entries: vec![
+                GovernanceEntry {
+                    pattern: DomainPattern::parse("healthcare.*").unwrap(),
+                    thresholds: t(0.10, false),
+                },
+                GovernanceEntry {
+                    pattern: DomainPattern::parse("healthcare.drug-interaction").unwrap(),
+                    thresholds: t(0.02, true),
+                },
+            ],
+        };
+        table.validate("alice").unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_governance_patterns() {
+        let table = GovernanceTable {
+            entries: vec![
+                GovernanceEntry {
+                    pattern: DomainPattern::parse("healthcare.*").unwrap(),
+                    thresholds: t(0.10, false),
+                },
+                GovernanceEntry {
+                    pattern: DomainPattern::parse("healthcare.*").unwrap(),
+                    thresholds: t(0.02, true),
+                },
+            ],
+        };
+        let err = table.validate("alice").unwrap_err();
+        assert!(
+            matches!(err, WireError::DomainScopeInvalid(ref m) if m.contains("duplicate") && m.contains("healthcare.*")),
+            "{err:?}"
+        );
     }
 
     #[test]

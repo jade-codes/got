@@ -298,6 +298,11 @@ impl TrustRegistry {
                 };
 
                 let domain_scope = parse_domain_scope(&a)?;
+                if let Some(ref scope) = domain_scope {
+                    scope.validate().map_err(|e| {
+                        WireError::RegistryParse(format!("agent {}: {e}", a.id))
+                    })?;
+                }
 
                 let mut governance_entries = Vec::new();
                 if let Some(rows) = a.governance_thresholds.take() {
@@ -308,6 +313,9 @@ impl TrustRegistry {
                 let governance_table = GovernanceTable {
                     entries: governance_entries,
                 };
+                governance_table
+                    .validate(&a.id)
+                    .map_err(|e| WireError::RegistryParse(format!("{e}")))?;
 
                 registry.add_agent(AgentEntry {
                     name: a.id,
