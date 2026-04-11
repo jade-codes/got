@@ -828,8 +828,19 @@ The wire protocol uses length-prefixed binary framing, implemented in
   hierarchy the trust registry declares, but the canonical taxonomy of
   competence domains (who maintains it, how new domains are added,
   dispute resolution) remains a governance question outside the protocol.
-- **Real hardware TEE** — `MockEnclave` provides the abstraction but actual
-  SGX/SEV/H100 integration is not implemented.
+- **Real hardware TEE** — `MockEnclave` validates the protocol *flow*
+  (frame capture, integrity verification, probe evaluation, causal
+  intervention, attestation signing) but does not provide a security
+  boundary — it runs in the same address space as the agent runtime
+  and the signing key, probes, and model handle are all reachable from
+  the host process. Actual SGX/SEV/H100 integration is genuinely
+  blocked on having the hardware to test against and the platform
+  SDKs and live attestation infrastructure
+  (Intel Attestation Service, AMD SEV firmware, NVIDIA attestation).
+  The contract a real adapter has to satisfy is documented in
+  [`enclave-adapter-contract.md`](enclave-adapter-contract.md), so
+  someone with the hardware can drop in a real implementation
+  without refactoring anything else in the workspace.
 
 ---
 

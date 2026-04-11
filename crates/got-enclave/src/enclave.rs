@@ -44,10 +44,41 @@ pub enum EnclaveError {
 
 /// Trait abstracting a hardware-isolated measurement environment.
 ///
-/// Implementations must guarantee:
-///   1. Activations are received from hardware capture, not from model software.
-///   2. The signing key never leaves the enclave boundary.
-///   3. Causal interventions are applied by the enclave, not by the model.
+/// **A real implementation IS the trust boundary** of the attestation
+/// pipeline.  Once a frame is inside the enclave, the model — and the
+/// host process running the model — must be unable to influence what
+/// the probes measure, what causal intervention reports, or what the
+/// signing key produces.  The mock implementation in this crate
+/// (`MockEnclave`) validates the protocol *flow* but does not provide
+/// these guarantees and is intentionally insecure.
+///
+/// Required guarantees for a production adapter:
+///
+///   1. **Activations come from hardware capture**, not from model
+///      software.  The capture device computes the integrity hash
+///      before the bytes leave the trust boundary; the enclave
+///      recomputes and rejects mismatches in `receive_activations`.
+///   2. **The signing key is generated inside the enclave** at
+///      provisioning time and never exported.  `verifying_key()` is
+///      the only key material that crosses the boundary.
+///   3. **Probes are provisioned through a secure channel** (sealed
+///      storage, remote attestation, etc.) and never visible to the
+///      host process running the model.
+///   4. **The model handle used for causal intervention runs inside
+///      the enclave**, not the host's model.  In a real TEE the model
+///      shard is loaded into trusted memory at provisioning time.
+///   5. **`attest_with_causal` embeds causal scores before signing**.
+///      A real adapter that asks the host to fill in causal scores
+///      after signing violates the contract — the attestation would
+///      carry an enclave-authorised key over host-tampered content.
+///   6. **Sequence numbers are monotonic and rollback-resistant**.
+///      Back the counter with a hardware monotonic counter
+///      (SGX MC, AMD vTPM, NVIDIA secure counter) so an old attestation
+///      cannot be replayed under a fresh-looking sequence number.
+///
+/// The full per-platform sketch of how SGX, SEV-SNP, and H100
+/// confidential computing satisfy this contract is in
+/// `docs/enclave-adapter-contract.md`.
 pub trait MeasurementEnclave {
     /// Receive activations from hardware capture and verify integrity.
     ///

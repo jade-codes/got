@@ -20,7 +20,7 @@ use crate::WireError;
 ///
 /// Permitted characters: lowercase ASCII letters, digits, `-`, and `.`
 /// as a separator. No leading/trailing dots and no empty segments.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Domain(String);
 
 impl Domain {

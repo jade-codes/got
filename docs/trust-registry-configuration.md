@@ -377,6 +377,131 @@ relax its governance bounds.
 
 ---
 
+## 5b. Cross-registry federation (§14.5)
+
+A single `TrustRegistry` is fine for a single-jurisdiction deployment.
+For multi-jurisdictional deployments — e.g. an EU healthcare authority,
+a US FDA registry, and a UK MHRA registry that all need to resolve
+agents in the same exchange pipeline — `got-wire::federation` provides
+a scoped composition layer.
+
+The full federation design from the protocol paper involves signed
+cross-registry vouching, async sync between authorities, revocation
+propagation, and arbitration policies for jurisdictional conflicts.
+That is multi-week work and out of scope for the PoC. **What this
+module provides instead is the composition layer**: an explicit-
+priority list of `TrustRegistry`s, conflict reporting on policy
+divergence, and a `resolve()` method that produces a single flat
+`TrustRegistry` the rest of the exchange pipeline can consume
+unchanged. No protocol changes, no signature changes to
+`validate_request`, no new wire format.
+
+### The model
+
+```rust
+use got_wire::federation::{FederatedRegistry, NamedRegistry};
+use got_wire::registry::TrustRegistry;
+
+let eu = TrustRegistry::load(&eu_path, &eu_digest)?;
+let us = TrustRegistry::load(&us_path, &us_digest)?;
+let uk = TrustRegistry::load(&uk_path, &uk_digest)?;
+
+let federation = FederatedRegistry::from_members(vec![
+    NamedRegistry { name: "eu-healthcare".into(), priority: 0, registry: eu },
+    NamedRegistry { name: "us-fda".into(),        priority: 1, registry: us },
+    NamedRegistry { name: "uk-mhra".into(),       priority: 2, registry: uk },
+]);
+
+// Inspect any policy conflicts before resolving.
+for w in federation.validate_consistency() {
+    eprintln!("federation warning: {w}");
+}
+
+// Resolve to a single TrustRegistry the rest of the pipeline uses.
+let resolved = federation.resolve()?;
+
+// Hand `resolved` to perform_exchange / validate_request as normal.
+```
+
+### Resolution semantics
+
+- **Cryptographic identity is universal.** Because
+  `agent_id = SHA-256(public_key)`, two registries that list the
+  same `agent_id` are by definition talking about the same key.
+  The federation never has to arbitrate identity — only the *policy*
+  attached to that identity (drift bounds, scope, governance,
+  expected_model_hash, certificate).
+- **Lower priority wins.** Priority is a Linux-style nice value:
+  `priority = 0` beats `priority = 1`. The first member registry
+  in priority order to claim a given `agent_id` provides the
+  resolved entry; lower-priority members are silently overridden
+  for that ID.
+- **Globals come from the head.** The resolved registry's
+  `max_chain_length`, `max_envelope_age_secs`, and
+  `max_attestation_age_secs` are inherited from the highest-priority
+  member. If you need different freshness windows per jurisdiction,
+  the federation layer cannot express that — you would need
+  per-agent overrides, which the protocol does not currently
+  support at this layer.
+- **CAs and CRLs are unioned.** The resolved registry trusts every
+  CA any member trusts and applies every CRL any member loaded.
+  This is intentional: revocation in one jurisdiction propagates
+  to the federated view immediately.
+- **Distinct agents are preserved.** Agents that appear in only
+  one member registry are simply added to the resolved set.
+
+### Conflict reporting
+
+`validate_consistency()` returns a `Vec<FederationWarning>` listing
+every material disagreement between member registries. The detected
+conflicts are:
+
+| `FederationWarning` variant | What it means |
+|---|---|
+| `MaxDriftMismatch` | Same agent registered with different `max_drift_accepted` flat fallback values |
+| `ExpectedModelHashMismatch` | Same agent pinned to different model hashes |
+| `DomainScopeMismatch` | Same agent declares different `primary_domain`, `permitted_domains`, or `exclusion_domains` |
+| `GovernanceTableMismatch` | Same agent has different `governance_thresholds` rows |
+
+Field comparisons are *order-insensitive* for the permitted /
+exclusion / governance lists — reordering the same set of patterns
+is not flagged as a conflict.
+
+### What conflict reporting does not catch
+
+- **Differences in the registry's global `[registry]` section.**
+  `max_chain_length` etc. are not per-agent, so the federation layer
+  ignores them; the highest-priority member's globals win silently.
+- **Roles that differ across registries.** `roles` is a
+  free-form list mostly used as a label; it is not part of the
+  conflict signature.
+- **Certificate metadata that differs.** Certificates are checked
+  separately at exchange time via the resolved CA / CRL union.
+
+### When to use federation
+
+- **Multi-jurisdictional deployments** where authoritative registries
+  exist in more than one place.
+- **Staged rollouts** where you want a "draft" registry to override
+  the "stable" registry for a subset of agents during a migration.
+- **Audit/operations split** where the security team maintains a
+  high-priority allowlist that overrides operational defaults from
+  a lower-priority deployment registry.
+
+### When **not** to use federation
+
+- Single-jurisdiction deployment with one authoritative registry —
+  use `TrustRegistry::load` directly.
+- You need cryptographically signed vouching across registries
+  ("the EU registry attests that the US registry is trusted") —
+  the scoped federation does **not** provide this. The full §14.5
+  design from the paper does, but it is not implemented.
+- You need real-time sync of revocation across federated authorities.
+  Federation here is a static-snapshot composer; refresh requires
+  reloading the member registries from disk.
+
+---
+
 ## 6. Deployment patterns
 
 ### PoC / development

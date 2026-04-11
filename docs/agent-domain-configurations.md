@@ -503,6 +503,130 @@ require_chain = true
 
 ---
 
+## 7b. Domain taxonomies (§14.4)
+
+The protocol does **not** define a canonical list of domains. Section
+4.4 of the protocol paper sketches an illustrative hierarchy
+(`agriculture.*`, `transport.*`, `healthcare.*`, etc.), but the actual
+canonical taxonomy is governance — the protocol cannot pick the names
+or the boundaries. What `got-wire::taxonomy` provides is the
+**machinery** a governance body would use to publish, distribute, and
+consult a taxonomy:
+
+- a stable TOML format,
+- a parser (`Taxonomy::from_toml` / `Taxonomy::load`),
+- hierarchy queries (`lookup`, `parent_of`, `descendants_of`),
+- an opt-in registry validator that returns `TaxonomyWarning`s for
+  any agent whose `primary_domain` is not registered in the loaded
+  taxonomy.
+
+The repo ships a **reference taxonomy** at
+`taxonomies/got-reference-v1.toml` that captures the paper's
+illustrative hierarchy plus the dual-purpose `vehicle.*` subtree from
+the §4.5 worked example. It is not authoritative — production
+deployments fork it (or write their own) and ratify the result through
+whatever governance process the operator chooses.
+
+### TOML format
+
+```toml
+[taxonomy]
+name        = "GoT Reference Taxonomy"
+version     = "1.0.0"
+maintainer  = "Synoptic Group CIC"
+last_updated = "2026-04-11"
+
+[[domain]]
+name        = "agriculture.crop-management"
+description = "Crop irrigation, pest response, harvest timing, yield optimisation."
+examples    = ["smart-farm decision support", "precision irrigation controllers"]
+suggested_max_drift                 = 0.10
+suggested_min_confidence            = 0.70
+suggested_require_chain             = false
+suggested_require_causal_validation = false
+
+[[domain]]
+name        = "vehicle.agricultural-tractor"
+description = "Self-driving agricultural machinery operating on both farmland and public roads."
+suggested_max_drift                 = 0.02
+suggested_min_confidence            = 0.90
+suggested_min_causal_score          = 0.85
+suggested_require_chain             = true
+suggested_require_causal_validation = true
+```
+
+The `suggested_*` fields are starting points for a registry author —
+the loader does not apply them automatically. They exist so the
+governance body's recommended thresholds for each domain travel with
+the taxonomy file and a registry author can copy them into a
+matching `governance_thresholds` row.
+
+### Validating a registry against a taxonomy
+
+```rust
+use got_wire::registry::TrustRegistry;
+use got_wire::taxonomy::{Taxonomy, TaxonomyWarning};
+
+let taxonomy = Taxonomy::load(&taxonomy_path)?;
+let registry = TrustRegistry::load(&registry_path, &registry_digest)?;
+
+let warnings = taxonomy.validate_registry(&registry);
+for w in &warnings {
+    eprintln!("warning: {w}");
+}
+```
+
+`validate_registry` returns one warning per agent whose
+`primary_domain` is not in the taxonomy. **Warnings are non-fatal** —
+the registry still loads. The whole point is that operators sometimes
+need to ship faster than governance can ratify a new domain; the
+warning surfaces the divergence for review without blocking the
+deployment. If you want the warning to be a hard error, the
+application code that loads the registry can promote it:
+
+```rust
+if !warnings.is_empty() {
+    eprintln!("registry has {} taxonomy warnings", warnings.len());
+    std::process::exit(1);
+}
+```
+
+### What the taxonomy is not
+
+- **Not authoritative.** The repo's reference taxonomy is one
+  governance body's illustrative example. Forking is expected.
+- **Not a runtime check.** The taxonomy is consulted at registry load
+  time, not on every exchange. A loaded `TrustRegistry` does not carry
+  a reference to its taxonomy.
+- **Not a substitute for `governance_thresholds`.** The `suggested_*`
+  fields are advice for registry authors; they do not flow into the
+  verifier automatically. If you want a domain's suggested thresholds
+  to be enforced, you must also write a matching
+  `governance_thresholds` row in the registry.
+- **Not federated.** A `Taxonomy` is one file. Multi-jurisdictional
+  deployments that need different taxonomies per registry can compose
+  them above the protocol layer; the protocol just provides the
+  per-file format.
+
+### Field-by-field reference
+
+| Field | Type | Default | Purpose |
+|---|---|---|---|
+| `[taxonomy] name` | string | `"unnamed"` | Human-readable name of the taxonomy |
+| `[taxonomy] version` | string | `"0"` | Version identifier (semver, date, anything stable) |
+| `[taxonomy] maintainer` | string | `None` | Governance body that publishes this taxonomy |
+| `[taxonomy] last_updated` | string | `None` | Free-form date or revision marker |
+| `[[domain]] name` | string (concrete domain) | required | Canonical domain name |
+| `[[domain]] description` | string | required | Human description of the domain's scope |
+| `[[domain]] examples[]` | array of strings | `[]` | Concrete examples of agents that fit this domain |
+| `[[domain]] suggested_max_drift` | f32 ≥ 0 | `None` | Suggested Frobenius drift bound for this domain |
+| `[[domain]] suggested_min_confidence` | f32 in `[0,1]` | `None` | Suggested per-reading confidence floor |
+| `[[domain]] suggested_min_causal_score` | f32 in `[0,1]` | `None` | Suggested causal consistency floor |
+| `[[domain]] suggested_require_chain` | bool | `false` | Whether the governance body recommends Tier 2+ |
+| `[[domain]] suggested_require_causal_validation` | bool | `false` | Whether the governance body recommends Tier 3 |
+
+---
+
 ## 8. What the validator does and does not catch
 
 The load-time validator catches **configuration mistakes**, not

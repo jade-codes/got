@@ -59,10 +59,31 @@ impl ActivationFrame {
 
 /// Abstraction over hardware activation capture.
 ///
-/// In production:
-///   - GPU DMA snoop captures layer output buffers
-///   - NVIDIA Confidential Computing (H100 TEE) provides trusted copy-out
-///   - CPU TEE (SGX/SEV) receives activations for enclave-side probing
+/// **A real implementation IS the byte path** between the model's
+/// memory and the enclave's memory — every byte the enclave consumes
+/// flows through this trait.  The integrity hash on each
+/// `ActivationFrame` MUST be computed by the capture hardware itself,
+/// not by the model process; the enclave then recomputes the hash via
+/// `frame.verify_integrity()` to detect tampering in transit.
+///
+/// Per-platform sketches:
+///   - **GPU DMA snoop**: capture layer output buffers from VRAM
+///     before the model process can sanitise them.
+///   - **NVIDIA H100 Confidential Computing**: the natural fit —
+///     capture and enclave both live inside the GPU's CC partition,
+///     activations are read directly from encrypted VRAM, no CPU
+///     round-trip.
+///   - **AMD SEV-SNP**: model process and capture process both run
+///     inside the encrypted guest VM; the hypervisor cannot read
+///     guest memory.
+///   - **Intel SGX**: harder, since the model usually runs on a GPU
+///     outside the enclave; SGX2 with EDMM can run a CPU model
+///     entirely inside the enclave at the cost of throughput.
+///
+/// The mock (`MockDmaTap`) computes hashes in-process and is
+/// intentionally insecure — it exists only so tests can exercise the
+/// pipeline without real hardware.  See
+/// `docs/enclave-adapter-contract.md` for the full contract.
 ///
 /// The trait is `Send + Sync` so implementations can run in dedicated
 /// capture threads.
