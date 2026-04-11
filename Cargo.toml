@@ -10,6 +10,7 @@ members = [
     "crates/got-incoherence",
     "crates/got-web",
     "crates/got-proxy",
+    "crates/got-net",
 ]
 resolver = "2"
 

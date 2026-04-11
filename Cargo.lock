@@ -1033,6 +1033,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "got-net"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "got-attest",
+ "got-core",
+ "got-wire",
+ "rand",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "got-probe"
 version = "0.1.0"
 dependencies = [

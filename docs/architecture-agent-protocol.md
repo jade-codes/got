@@ -783,6 +783,12 @@ The wire protocol uses length-prefixed binary framing, implemented in
 | Trust registry | `TrustRegistry::from_toml()` / `.load()` / `.lookup()` | `got-wire::registry` | S-2: integrity |
 | Frame encode | `Frame::encode()` → `Result<Vec<u8>, WireError>` | `got-wire::frame` | N-1: size guard |
 | Frame decode | `Frame::decode()` | `got-wire::frame` | — |
+| Concrete TCP transport | `TcpTransport` (sync `Transport` impl) | `got-net::transport` | 16 MiB recv guard |
+| Async exchange listener | `serve(addr, config)` / `accept_loop(...)` | `got-net::server` | tokio + spawn_blocking per connection |
+| Sync per-connection handler | `handle_connection(stream, &config)` | `got-net::server` | Runs Noise NK accept + validate_request + signed response |
+| Async client | `request(addr, params, registry).await` | `got-net::client` | Wraps `request_blocking` in `spawn_blocking` |
+| Sync client | `request_blocking(addr, params, &registry)` | `got-net::client` | Connect → Noise NK initiate → exchange |
+| Wire codec for ExchangeRequest/Response | `encode_exchange_request` / `decode_exchange_request` (and Response) | `got-net::codec` | 32-byte agent_id + 200-byte envelope + length-prefixed JSON for attestations |
 | Store attestation | `store.append(attestation, verifying_key)` | `got-store` | atomic + hash |
 | Query attestations | `store.query(&filter)` / `store.chain(model_id)` | `got-store` | — |
 | Audit model | `store.audit(model_id)` | `got-store` | — |
@@ -795,10 +801,20 @@ The wire protocol uses length-prefixed binary framing, implemented in
 
 - **Key distribution** — how agents discover each other's public keys. Assumed
   out-of-band (trust registry TOML, PKI, web-of-trust, etc.).
-- **Network transport** — the wire framing is defined but actual TCP/TLS
-  transport is not implemented. Frames are currently exchanged in-memory.
-- **Confidentiality** — attestations are signed but not encrypted. An
-  eavesdropper sees probe readings and geometry hashes.
+- **Network transport** — `got-net` provides a concrete TCP transport
+  with Noise NK encryption layered over the existing `Transport` trait.
+  A tokio listener accepts inbound connections and dispatches each one
+  to a blocking thread that runs the sync Noise + exchange path
+  unchanged. See `got-net::server::serve` and
+  `got-net::client::request`. Production deployments that need TLS-
+  on-the-outside (regulatory, legacy infrastructure) can wrap the
+  `TcpStream` in `rustls` before handing it to `TcpTransport::new`.
+- **Confidentiality** — geometric attestations are signed but the
+  attestation payload itself is not encrypted at rest or in archives.
+  Over the wire, `got-net` wraps the exchange in a Noise NK session
+  (ChaCha20-Poly1305) so an eavesdropper on a live exchange sees only
+  ciphertext; persisted attestations and registry-side caches are
+  still plaintext.
 - **Ordering guarantees** — chain integrity assumes delivery in order.
   Out-of-order delivery requires buffering and reordering by parent hash.
 - **Liveness** — no heartbeat or timeout mechanism. An agent that stops
