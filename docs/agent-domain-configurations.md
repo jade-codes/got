@@ -540,26 +540,29 @@ last_updated = "2026-04-11"
 name        = "agriculture.crop-management"
 description = "Crop irrigation, pest response, harvest timing, yield optimisation."
 examples    = ["smart-farm decision support", "precision irrigation controllers"]
-suggested_max_drift                 = 0.10
-suggested_min_confidence            = 0.70
-suggested_require_chain             = false
-suggested_require_causal_validation = false
+max_drift                 = 0.10
+min_confidence            = 0.70
+require_chain             = false
+require_causal_validation = false
 
 [[domain]]
 name        = "vehicle.agricultural-tractor"
 description = "Self-driving agricultural machinery operating on both farmland and public roads."
-suggested_max_drift                 = 0.02
-suggested_min_confidence            = 0.90
-suggested_min_causal_score          = 0.85
-suggested_require_chain             = true
-suggested_require_causal_validation = true
+max_drift                 = 0.02
+min_confidence            = 0.90
+min_causal_score          = 0.85
+require_chain             = true
+require_causal_validation = true
 ```
 
-The `suggested_*` fields are starting points for a registry author —
-the loader does not apply them automatically. They exist so the
-governance body's recommended thresholds for each domain travel with
-the taxonomy file and a registry author can copy them into a
-matching `governance_thresholds` row.
+The per-domain governance fields (`max_drift`, `min_confidence`,
+`min_causal_score`, `require_chain`, `require_causal_validation`)
+are starting points for a registry author — the loader does not
+apply them automatically. They exist so the governance body's
+recommended thresholds for each domain travel with the taxonomy
+file. Field names mirror `GovernanceThresholds` exactly so a row
+can be pasted directly into a registry's `governance_thresholds`
+table without renaming anything.
 
 ### Validating a registry against a taxonomy
 
@@ -598,11 +601,11 @@ if !warnings.is_empty() {
 - **Not a runtime check.** The taxonomy is consulted at registry load
   time, not on every exchange. A loaded `TrustRegistry` does not carry
   a reference to its taxonomy.
-- **Not a substitute for `governance_thresholds`.** The `suggested_*`
-  fields are advice for registry authors; they do not flow into the
-  verifier automatically. If you want a domain's suggested thresholds
-  to be enforced, you must also write a matching
-  `governance_thresholds` row in the registry.
+- **Not a substitute for `governance_thresholds`.** The taxonomy's
+  per-domain fields are advice for registry authors; they do not
+  flow into the verifier automatically. If you want a domain's
+  recommended thresholds to be enforced, you must also write a
+  matching `governance_thresholds` row in the registry.
 - **Not federated.** A `Taxonomy` is one file. Multi-jurisdictional
   deployments that need different taxonomies per registry can compose
   them above the protocol layer; the protocol just provides the
@@ -619,11 +622,11 @@ if !warnings.is_empty() {
 | `[[domain]] name` | string (concrete domain) | required | Canonical domain name |
 | `[[domain]] description` | string | required | Human description of the domain's scope |
 | `[[domain]] examples[]` | array of strings | `[]` | Concrete examples of agents that fit this domain |
-| `[[domain]] suggested_max_drift` | f32 ≥ 0 | `None` | Suggested Frobenius drift bound for this domain |
-| `[[domain]] suggested_min_confidence` | f32 in `[0,1]` | `None` | Suggested per-reading confidence floor |
-| `[[domain]] suggested_min_causal_score` | f32 in `[0,1]` | `None` | Suggested causal consistency floor |
-| `[[domain]] suggested_require_chain` | bool | `false` | Whether the governance body recommends Tier 2+ |
-| `[[domain]] suggested_require_causal_validation` | bool | `false` | Whether the governance body recommends Tier 3 |
+| `[[domain]] max_drift` | f32 ≥ 0 | `None` | Suggested Frobenius drift bound for this domain |
+| `[[domain]] min_confidence` | f32 in `[0,1]` | `None` | Suggested per-reading confidence floor |
+| `[[domain]] min_causal_score` | f32 in `[0,1]` | `None` | Suggested causal consistency floor |
+| `[[domain]] require_chain` | bool | `false` | Whether the governance body recommends Tier 2+ |
+| `[[domain]] require_causal_validation` | bool | `false` | Whether the governance body recommends Tier 3 |
 
 ---
 

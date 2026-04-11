@@ -32,15 +32,23 @@ use crate::WireError;
 
 /// One entry in a taxonomy: a single concrete domain with metadata
 /// and suggested governance defaults that a registry author can copy.
+///
+/// Field names mirror `GovernanceThresholds` exactly so a registry
+/// author can paste a row from a taxonomy entry directly into a
+/// `governance_thresholds` table without renaming anything.  These
+/// values are advisory — the loader does not apply them automatically
+/// to a `TrustRegistry`; they exist so the governance body's
+/// recommended thresholds for each domain travel with the taxonomy
+/// file.
 #[derive(Debug, Clone)]
 pub struct DomainEntry {
     pub description: String,
     pub examples: Vec<String>,
-    pub suggested_max_drift: Option<f32>,
-    pub suggested_min_confidence: Option<f32>,
-    pub suggested_min_causal_score: Option<f32>,
-    pub suggested_require_chain: bool,
-    pub suggested_require_causal_validation: bool,
+    pub max_drift: Option<f32>,
+    pub min_confidence: Option<f32>,
+    pub min_causal_score: Option<f32>,
+    pub require_chain: bool,
+    pub require_causal_validation: bool,
 }
 
 /// A taxonomy: a curated set of `Domain → DomainEntry` mappings plus
@@ -78,26 +86,26 @@ impl Taxonomy {
 
         for entry in parsed.domain.unwrap_or_default() {
             let d = Domain::parse(&entry.name)?;
-            if let Some(c) = entry.suggested_min_confidence {
+            if let Some(c) = entry.min_confidence {
                 if !(0.0..=1.0).contains(&c) {
                     return Err(WireError::DomainParse(format!(
-                        "taxonomy {}: suggested_min_confidence must be in [0,1], got {c}",
+                        "taxonomy {}: min_confidence must be in [0,1], got {c}",
                         entry.name
                     )));
                 }
             }
-            if let Some(c) = entry.suggested_min_causal_score {
+            if let Some(c) = entry.min_causal_score {
                 if !(0.0..=1.0).contains(&c) {
                     return Err(WireError::DomainParse(format!(
-                        "taxonomy {}: suggested_min_causal_score must be in [0,1], got {c}",
+                        "taxonomy {}: min_causal_score must be in [0,1], got {c}",
                         entry.name
                     )));
                 }
             }
-            if let Some(d_) = entry.suggested_max_drift {
+            if let Some(d_) = entry.max_drift {
                 if d_.is_nan() || d_ < 0.0 {
                     return Err(WireError::DomainParse(format!(
-                        "taxonomy {}: suggested_max_drift must be non-negative, got {d_}",
+                        "taxonomy {}: max_drift must be non-negative, got {d_}",
                         entry.name
                     )));
                 }
@@ -113,11 +121,11 @@ impl Taxonomy {
                 DomainEntry {
                     description: entry.description,
                     examples: entry.examples.unwrap_or_default(),
-                    suggested_max_drift: entry.suggested_max_drift,
-                    suggested_min_confidence: entry.suggested_min_confidence,
-                    suggested_min_causal_score: entry.suggested_min_causal_score,
-                    suggested_require_chain: entry.suggested_require_chain,
-                    suggested_require_causal_validation: entry.suggested_require_causal_validation,
+                    max_drift: entry.max_drift,
+                    min_confidence: entry.min_confidence,
+                    min_causal_score: entry.min_causal_score,
+                    require_chain: entry.require_chain,
+                    require_causal_validation: entry.require_causal_validation,
                 },
             );
         }
@@ -239,15 +247,15 @@ struct DomainEntryToml {
     #[serde(default)]
     examples: Option<Vec<String>>,
     #[serde(default)]
-    suggested_max_drift: Option<f32>,
+    max_drift: Option<f32>,
     #[serde(default)]
-    suggested_min_confidence: Option<f32>,
+    min_confidence: Option<f32>,
     #[serde(default)]
-    suggested_min_causal_score: Option<f32>,
+    min_causal_score: Option<f32>,
     #[serde(default)]
-    suggested_require_chain: bool,
+    require_chain: bool,
     #[serde(default)]
-    suggested_require_causal_validation: bool,
+    require_causal_validation: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -279,22 +287,22 @@ description = "Agricultural operations"
 [[domain]]
 name = "agriculture.crop-management"
 description = "Crop management"
-suggested_max_drift = 0.10
-suggested_require_chain = false
+max_drift = 0.10
+require_chain = false
 
 [[domain]]
 name = "vehicle.agricultural-tractor"
 description = "Self-driving agricultural machinery"
-suggested_max_drift = 0.02
-suggested_require_chain = true
-suggested_require_causal_validation = true
+max_drift = 0.02
+require_chain = true
+require_causal_validation = true
 
 [[domain]]
 name = "healthcare.diagnostic-advisory"
 description = "Diagnostic advisory"
-suggested_max_drift = 0.03
-suggested_min_causal_score = 0.85
-suggested_require_causal_validation = true
+max_drift = 0.03
+min_causal_score = 0.85
+require_causal_validation = true
 "#;
         Taxonomy::from_toml(toml).unwrap()
     }
@@ -313,9 +321,9 @@ suggested_require_causal_validation = true
         let t = sample_taxonomy();
         let e = t.lookup(&d("vehicle.agricultural-tractor")).unwrap();
         assert!(e.description.contains("agricultural"));
-        assert_eq!(e.suggested_max_drift, Some(0.02));
-        assert!(e.suggested_require_chain);
-        assert!(e.suggested_require_causal_validation);
+        assert_eq!(e.max_drift, Some(0.02));
+        assert!(e.require_chain);
+        assert!(e.require_causal_validation);
     }
 
     #[test]
@@ -388,7 +396,7 @@ description = "second"
 [[domain]]
 name = "x"
 description = "test"
-suggested_min_confidence = 1.5
+min_confidence = 1.5
 "#;
         assert!(Taxonomy::from_toml(toml).is_err());
     }
@@ -399,7 +407,7 @@ suggested_min_confidence = 1.5
 [[domain]]
 name = "x"
 description = "test"
-suggested_max_drift = -0.1
+max_drift = -0.1
 "#;
         assert!(Taxonomy::from_toml(toml).is_err());
     }
@@ -474,9 +482,9 @@ suggested_max_drift = -0.1
             "reference taxonomy must include the dual-purpose tractor"
         );
         let tractor = t.lookup(&Domain::parse("vehicle.agricultural-tractor").unwrap()).unwrap();
-        assert_eq!(tractor.suggested_max_drift, Some(0.02));
-        assert!(tractor.suggested_require_chain);
-        assert!(tractor.suggested_require_causal_validation);
+        assert_eq!(tractor.max_drift, Some(0.02));
+        assert!(tractor.require_chain);
+        assert!(tractor.require_causal_validation);
     }
 
     #[test]

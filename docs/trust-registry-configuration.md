@@ -406,10 +406,12 @@ let eu = TrustRegistry::load(&eu_path, &eu_digest)?;
 let us = TrustRegistry::load(&us_path, &us_digest)?;
 let uk = TrustRegistry::load(&uk_path, &uk_digest)?;
 
+// Simple form: no integrity pin, no operator key, no vouchers.
+// Equivalent to the pre-vouching API.
 let federation = FederatedRegistry::from_members(vec![
-    NamedRegistry { name: "eu-healthcare".into(), priority: 0, registry: eu },
-    NamedRegistry { name: "us-fda".into(),        priority: 1, registry: us },
-    NamedRegistry { name: "uk-mhra".into(),       priority: 2, registry: uk },
+    NamedRegistry::unverified("eu-healthcare", 0, eu),
+    NamedRegistry::unverified("us-fda",        1, us),
+    NamedRegistry::unverified("uk-mhra",       2, uk),
 ]);
 
 // Inspect any policy conflicts before resolving.
@@ -478,6 +480,114 @@ is not flagged as a conflict.
 - **Certificate metadata that differs.** Certificates are checked
   separately at exchange time via the resolved CA / CRL union.
 
+### Signed cross-registry vouching
+
+Operational composition is enough for trusted environments where
+every operator already knows which other operators they accept. For
+deployments where federation members need to *cryptographically*
+declare cross-trust — so a verifier can detect an unauthorised member
+that was slipped into the federation file — the
+`FederationVoucher` type provides one-hop signed vouching.
+
+The model: each member registry's *operator* (distinct from the
+agents inside the registry) holds an Ed25519 keypair. When operator A
+decides to vouch for operator B's registry, A signs a
+`FederationVoucher` over B's registry file digest. Any holder of the
+voucher and A's verifying key can confirm that A endorsed B's
+registry at a specific digest, with optional expiry.
+
+```rust
+use got_wire::federation::{FederatedRegistry, FederationVoucher, NamedRegistry};
+use got_wire::registry::{compute_agent_id, TrustRegistry};
+
+// Operators hold separate keys from any agents in their registries.
+let eu_operator: ed25519_dalek::SigningKey = load_eu_operator_key()?;
+let us_operator: ed25519_dalek::SigningKey = load_us_operator_key()?;
+
+// Load and pin the registry files.
+let eu_digest = sha256(&std::fs::read(&eu_path)?);
+let us_digest = sha256(&std::fs::read(&us_path)?);
+let eu = TrustRegistry::load(&eu_path, &eu_digest)?;
+let us = TrustRegistry::load(&us_path, &us_digest)?;
+
+// EU operator vouches for the US registry.
+let voucher = FederationVoucher::create(
+    compute_agent_id(&eu_operator.verifying_key()),
+    us_digest,
+    "us-fda",
+    now_unix(),
+    now_unix() + 30 * 86_400,        // 30-day expiry
+    "ratified at G7 healthcare summit 2026-Q2",
+    &eu_operator,
+)?;
+
+// Build the federation with operator keys + vouchers attached.
+let federation = FederatedRegistry::from_members(vec![
+    NamedRegistry {
+        name: "eu-healthcare".into(),
+        priority: 0,                                  // root of trust
+        registry: eu,
+        digest: Some(eu_digest),
+        operator_key: Some(eu_operator.verifying_key()),
+        vouchers: vec![],                             // root needs no voucher
+    },
+    NamedRegistry {
+        name: "us-fda".into(),
+        priority: 1,
+        registry: us,
+        digest: Some(us_digest),
+        operator_key: Some(us_operator.verifying_key()),
+        vouchers: vec![voucher],
+    },
+]);
+
+// Verify the chain before resolving.
+for w in federation.verify_vouchers(now_unix()) {
+    eprintln!("voucher warning: {w}");
+}
+```
+
+`FederatedRegistry::verify_vouchers(now_unix)` walks every non-lead
+member and checks that at least one of its `vouchers`:
+
+1. Has an `issuer_id` matching the operator key of some
+   higher-priority member.
+2. Verifies cryptographically against that operator's verifying key.
+3. Signs over a `subject_digest` matching the member's `digest`
+   field.
+4. Has not expired at `now_unix`.
+
+Members that satisfy all four checks are considered vouched. The
+lead (priority 0) is the root of trust — it does not need a voucher.
+Failures emit `VoucherWarning` variants:
+
+| Variant | Cause |
+|---|---|
+| `Missing` | Non-lead member has no voucher that passes all four checks. The warning lists which higher-priority members *could* have signed one. |
+| `Expired` | Voucher's `not_after` has passed. |
+| `SignatureInvalid` | Signature does not verify against the named issuer's key. |
+| `DigestMismatch` | Voucher signs over a different digest than the on-disk file. Either the file was tampered with or the voucher is stale relative to a registry update. |
+| `UnknownIssuer` | `issuer_id` does not correspond to any higher-priority member's `operator_key`. |
+| `NoDigestPin` | A non-lead member's `digest` is `None`, so vouchers cannot bind to it. |
+
+### Vouching limitations
+
+The scoped vouching layer is **one-hop** and **structural**. It
+does not provide:
+
+- **Multi-hop chains.** A vouches B, B vouches C — the verifier
+  does not aggregate this into "A transitively vouches C". Each
+  member must carry a voucher from a higher-priority neighbour.
+- **Voucher revocation lists.** The only revocation mechanism is
+  expiry. Set short `not_after` deadlines and re-issue.
+- **Operator key rotation.** Operators are pinned by the verifying
+  key in `NamedRegistry::operator_key`. Rotating an operator key
+  requires rebuilding the federation file with the new key and
+  re-issuing every voucher signed by the old key.
+- **Async sync between authorities.** Vouchers are static artefacts
+  loaded with the federation file; live sync would need a separate
+  fetch protocol.
+
 ### When to use federation
 
 - **Multi-jurisdictional deployments** where authoritative registries
@@ -492,13 +602,12 @@ is not flagged as a conflict.
 
 - Single-jurisdiction deployment with one authoritative registry —
   use `TrustRegistry::load` directly.
-- You need cryptographically signed vouching across registries
-  ("the EU registry attests that the US registry is trusted") —
-  the scoped federation does **not** provide this. The full §14.5
-  design from the paper does, but it is not implemented.
 - You need real-time sync of revocation across federated authorities.
   Federation here is a static-snapshot composer; refresh requires
   reloading the member registries from disk.
+- You need multi-hop voucher chains, voucher CRLs, or live operator
+  key rotation. These are real federation features but they are not
+  implemented in the scoped layer.
 
 ---
 

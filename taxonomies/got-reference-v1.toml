@@ -14,9 +14,12 @@
 # fatal — operators are free to ship registries that use unregistered
 # domains, the warning just surfaces the divergence for review.
 #
-# Suggested governance defaults are provided per domain; registry
-# authors should treat them as starting points and tighten or loosen
-# them based on the deployment's actual risk profile.
+# Per-domain governance defaults are provided as starting points;
+# registry authors should treat them as advisory and tighten or
+# loosen them based on the deployment's actual risk profile.  Field
+# names mirror `GovernanceThresholds` exactly so a row can be pasted
+# directly into a registry's `governance_thresholds` table without
+# renaming anything.
 
 [taxonomy]
 name        = "GoT Reference Taxonomy"
@@ -37,22 +40,22 @@ examples    = ["umbrella node — agents typically register under a sub-domain"]
 name        = "agriculture.crop-management"
 description = "Crop irrigation, pest response, harvest timing, yield optimisation. Stationary on-farm decision-making."
 examples    = ["smart-farm decision support", "precision irrigation controllers"]
-suggested_max_drift                 = 0.10
-suggested_min_confidence            = 0.70
-suggested_require_chain             = false
-suggested_require_causal_validation = false
+max_drift                 = 0.10
+min_confidence            = 0.70
+require_chain             = false
+require_causal_validation = false
 
 [[domain]]
 name        = "agriculture.livestock"
 description = "Livestock health monitoring, feeding schedules, breeding recommendations."
-suggested_max_drift                 = 0.10
-suggested_min_confidence            = 0.70
+max_drift                 = 0.10
+min_confidence            = 0.70
 
 [[domain]]
 name        = "agriculture.supply-chain"
 description = "Coordination of harvest, storage, and inter-farm logistics for agricultural goods."
-suggested_max_drift                 = 0.10
-suggested_require_chain             = true
+max_drift                 = 0.10
+require_chain             = true
 
 # ---------------------------------------------------------------------------
 # transport.*
@@ -67,23 +70,23 @@ examples    = ["umbrella node"]
 name        = "transport.autonomous-vehicle"
 description = "Self-driving vehicles operating on public roads. Pure transport — value structure prioritises collision avoidance, pedestrian safety, regulatory compliance."
 examples    = ["robotaxi", "autonomous truck", "delivery rover on public roads"]
-suggested_max_drift                 = 0.02
-suggested_min_confidence            = 0.90
-suggested_min_causal_score          = 0.85
-suggested_require_chain             = true
-suggested_require_causal_validation = true
+max_drift                 = 0.02
+min_confidence            = 0.90
+min_causal_score          = 0.85
+require_chain             = true
+require_causal_validation = true
 
 [[domain]]
 name        = "transport.logistics"
 description = "Fleet routing, freight scheduling, intermodal coordination. Non-driving transport optimisation."
-suggested_max_drift                 = 0.05
-suggested_require_chain             = true
+max_drift                 = 0.05
+require_chain             = true
 
 [[domain]]
 name        = "transport.traffic-management"
 description = "Signal timing, incident response, congestion control."
-suggested_max_drift                 = 0.03
-suggested_require_chain             = true
+max_drift                 = 0.03
+require_chain             = true
 
 # ---------------------------------------------------------------------------
 # vehicle.*  (dual-purpose physical machinery — see §4.5 worked example)
@@ -98,18 +101,18 @@ examples    = ["umbrella node"]
 name        = "vehicle.agricultural-tractor"
 description = "Self-driving agricultural machinery operating on both farmland and public roads. Value geometry weighs yield outcomes and collision avoidance simultaneously — neither agriculture.* nor transport.* alone captures the tradeoff."
 examples    = ["autonomous tractor", "harvester with road-transit mode"]
-suggested_max_drift                 = 0.02
-suggested_min_confidence            = 0.90
-suggested_min_causal_score          = 0.85
-suggested_require_chain             = true
-suggested_require_causal_validation = true
+max_drift                 = 0.02
+min_confidence            = 0.90
+min_causal_score          = 0.85
+require_chain             = true
+require_causal_validation = true
 
 [[domain]]
 name        = "vehicle.construction-excavator"
 description = "Self-driving construction machinery operating on both worksites and public roads in transit. Dual-purpose like agricultural-tractor."
-suggested_max_drift                 = 0.02
-suggested_require_chain             = true
-suggested_require_causal_validation = true
+max_drift                 = 0.02
+require_chain             = true
+require_causal_validation = true
 
 # ---------------------------------------------------------------------------
 # healthcare.*
@@ -123,31 +126,31 @@ examples    = ["umbrella node"]
 [[domain]]
 name        = "healthcare.diagnostic-advisory"
 description = "Clinical decision support for diagnosis: symptom analysis, differential diagnosis suggestion, test result interpretation. Outputs are advisory to a clinician, never autonomous."
-suggested_max_drift                 = 0.03
-suggested_min_confidence            = 0.80
-suggested_min_causal_score          = 0.85
-suggested_require_chain             = true
-suggested_require_causal_validation = true
+max_drift                 = 0.03
+min_confidence            = 0.80
+min_causal_score          = 0.85
+require_chain             = true
+require_causal_validation = true
 
 [[domain]]
 name        = "healthcare.drug-interaction"
 description = "Drug interaction checking, contraindication flagging, dosage validation."
-suggested_max_drift                 = 0.02
-suggested_min_confidence            = 0.85
-suggested_min_causal_score          = 0.85
-suggested_require_chain             = true
-suggested_require_causal_validation = true
+max_drift                 = 0.02
+min_confidence            = 0.85
+min_causal_score          = 0.85
+require_chain             = true
+require_causal_validation = true
 
 [[domain]]
 name        = "healthcare.patient-scheduling"
 description = "Appointment booking, resource allocation, capacity planning."
-suggested_max_drift                 = 0.05
-suggested_require_chain             = true
+max_drift                 = 0.05
+require_chain             = true
 
 [[domain]]
 name        = "healthcare.regulator"
 description = "Regulatory oversight role for healthcare agents. Typically declared by an agent acting as a `regulatory-observer` (§5.5 Supervised mode)."
-suggested_require_causal_validation = true
+require_causal_validation = true
 
 # ---------------------------------------------------------------------------
 # infrastructure.*
@@ -161,26 +164,26 @@ examples    = ["umbrella node"]
 [[domain]]
 name        = "infrastructure.energy-grid"
 description = "Electricity grid management: load balancing, demand response, renewable integration. Critical infrastructure — strict drift bounds."
-suggested_max_drift                 = 0.02
-suggested_min_confidence            = 0.90
-suggested_min_causal_score          = 0.85
-suggested_require_chain             = true
-suggested_require_causal_validation = true
+max_drift                 = 0.02
+min_confidence            = 0.90
+min_causal_score          = 0.85
+require_chain             = true
+require_causal_validation = true
 
 [[domain]]
 name        = "infrastructure.water-systems"
 description = "Water treatment, distribution, quality monitoring. Critical infrastructure — strict drift bounds."
-suggested_max_drift                 = 0.02
-suggested_min_confidence            = 0.90
-suggested_min_causal_score          = 0.85
-suggested_require_chain             = true
-suggested_require_causal_validation = true
+max_drift                 = 0.02
+min_confidence            = 0.90
+min_causal_score          = 0.85
+require_chain             = true
+require_causal_validation = true
 
 [[domain]]
 name        = "infrastructure.traffic-management"
 description = "Road traffic infrastructure: signal control, ramp metering, incident response. Distinct from transport.* in that this is the *infrastructure* side, not the vehicles using it."
-suggested_max_drift                 = 0.03
-suggested_require_chain             = true
+max_drift                 = 0.03
+require_chain             = true
 
 # ---------------------------------------------------------------------------
 # finance.*
@@ -194,20 +197,20 @@ examples    = ["umbrella node"]
 [[domain]]
 name        = "finance.trading"
 description = "Market analysis, order execution, position management. Subject to financial regulators via Supervised mode (§5.5)."
-suggested_max_drift                 = 0.05
-suggested_require_chain             = true
+max_drift                 = 0.05
+require_chain             = true
 
 [[domain]]
 name        = "finance.risk-assessment"
 description = "Credit risk, market risk, operational risk modelling."
-suggested_max_drift                 = 0.05
-suggested_min_confidence            = 0.80
-suggested_require_chain             = true
+max_drift                 = 0.05
+min_confidence            = 0.80
+require_chain             = true
 
 [[domain]]
 name        = "finance.regulatory-compliance"
 description = "Oversight authority for finance.* agents. Declared by regulators acting in Supervised mode (§5.5) — paired with finance.trading and finance.risk-assessment."
-suggested_require_causal_validation = true
+require_causal_validation = true
 
 # ---------------------------------------------------------------------------
 # meteorology.*
@@ -221,4 +224,4 @@ examples    = ["umbrella node"]
 [[domain]]
 name        = "meteorology.forecasting"
 description = "Weather prediction outputs consumed by other domains (typically agriculture.* and infrastructure.*) in Advisory mode."
-suggested_max_drift                 = 0.10
+max_drift                 = 0.10
