@@ -297,6 +297,13 @@ cooperating. This is the fundamental agent-to-agent protocol.
        |                           |     None, registry) ---|
        |                           |   (S-2: registry       |
        |                           |    integrity verified)  |
+       |                           |   §4 Phase 0:          |
+       |                           |     check_domain_      |
+       |                           |     compatibility(     |
+       |                           |       peer, self) — if |
+       |                           |     either side fails  |
+       |                           |     → Verdict::Rejected|
+       |                           |     before envelope    |
        |                           |                        |
        |                           |   build_response(      |
        |                           |     nonce, id_A,       |

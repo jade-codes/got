@@ -288,6 +288,15 @@ All flows reflect the security-hardened codebase (353 tests passing).
            rsp, id_A, nonce,              req, id_B, nonce,
            registry)                      registry)
                 |                                |
+   Phase 0 — Domain check:          Phase 0 — Domain check:
+     check_domain_                    check_domain_
+       compatibility(                   compatibility(
+         peer_scope,                      peer_scope,
+         self_scope)                      self_scope)
+     §4 / Appendix B                  §4 / Appendix B
+     STRUCTURAL — runs                STRUCTURAL — runs
+     before envelope                  before envelope
+                |                                |
    Envelope verify:                 Envelope verify:
      Ed25519 sig check                Ed25519 sig check
      peer_agent_id match              peer_agent_id match

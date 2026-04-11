@@ -111,12 +111,14 @@ graph TB
             ENV_FIELDS["nonce [32B] ‖ peer_agent_id [32B]<br/>‖ attestation_hash [32B]<br/>‖ chain_root [32B] ‖ timestamp [8B]<br/>+ Ed25519 sig [64B]<br/>S-9: verified flag"]
         end
 
+        DOMAIN_CHECK["Phase 0:<br/>check_domain_compatibility()<br/>(§4 / Appendix B)<br/>exclusions ✓ | bidirectional<br/>permission ✓ | mode<br/>intersection ✓<br/>STRUCTURAL — runs first"]
+
         VALIDATE_REQ["validate_request()<br/>Ed25519 sig ✓ | peer_id ✓<br/>attest_hash ✓ | chain_root ✓<br/>timestamp freshness ✓"]
         VALIDATE_RSP["validate_response()"]
 
         CHAIN_VERIFY["verify_chain(chain, current,<br/>&[VerifyingKey], max_drift)<br/>S-8: key rotation support<br/>→ ChainVerdict"]
 
-        REGISTRY["TrustRegistry (TOML)<br/>S-2: SHA-256 integrity on load<br/>AgentEntry { agent_id,<br/>expected_model_hash,<br/>max_drift, roles }<br/>max_attestation_age_secs"]
+        REGISTRY["TrustRegistry (TOML)<br/>S-2: SHA-256 integrity on load<br/>AgentEntry { agent_id,<br/>expected_model_hash,<br/>max_drift, roles,<br/>domain_scope }<br/>max_attestation_age_secs"]
 
         DECIDE{"Both Accepted?"}
         COOPERATE["✅ Cooperate"]
@@ -129,6 +131,9 @@ graph TB
         BOB --> RSP
         RSP --> FRAME
         VALIDATE_RSP --> CHAIN_VERIFY
+        REGISTRY --> DOMAIN_CHECK
+        DOMAIN_CHECK --> VALIDATE_REQ
+        DOMAIN_CHECK --> VALIDATE_RSP
         REGISTRY --> VALIDATE_REQ
         REGISTRY --> VALIDATE_RSP
         CHAIN_VERIFY --> DECIDE

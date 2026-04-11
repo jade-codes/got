@@ -73,8 +73,18 @@ layer adds one guarantee on top of the layers below it.
 │                                │ │  TrustRegistry (TOML)                │
 │                                │ │    S-2: SHA-256 integrity on load    │
 │                                │ │    AgentEntry + expected_model_hash  │
+│                                │ │    + domain_scope (Option)           │
 │                                │ │    max_attestation_age_secs          │
 │                                │ │  agent_id = SHA-256(public_key)      │
+│                                │ │                                      │
+│                                │ │  Domain scoping (§4 / Appendix B):   │
+│                                │ │    Domain / DomainPattern            │
+│                                │ │    InteractionMode                   │
+│                                │ │    DomainScope { primary,            │
+│                                │ │      permitted, exclusions }         │
+│                                │ │    check_domain_compatibility()      │
+│                                │ │    → Phase 0 in validate_request /   │
+│                                │ │      validate_response (before crypto)│
 └────────┬───────────────────────┘ └──────┬───────────────────────────────┘
          │                                │
          v                                v

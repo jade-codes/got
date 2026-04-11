@@ -24,6 +24,7 @@ All protocol paths reflect the security-hardened codebase (353 tests passing).
 | A6 | Envelope timestamps provide freshness (configurable max age) | S-9: prevents replay of old attestations |
 | A7 | Hardware enclave keeps signing key inside trust boundary | Key never exposed to application layer |
 | A8 | Chain verification accepts multiple signer keys | S-8: supports key rotation across chain boundaries |
+| A9 | Each agent declares a domain scope (primary domain, permitted patterns, exclusions) | §4 / Appendix B: enforces structural cross-domain boundaries before any cryptographic verification |
 
 ---
 
@@ -41,6 +42,17 @@ The exchange protocol is implemented in `got-wire::exchange`:
 ```
   Agent Alice                  Channel               Agent Bob
   (Model A, KeyPair A)                                (Model B, KeyPair B)
+       |                          |                        |
+       |   ---- PHASE 0: Domain Compatibility (local) ---- |
+       |                          |                        |
+       |  registry.lookup(id_B)   |    registry.lookup(id_A)|
+       |  check_domain_           |    check_domain_       |
+       |    compatibility(        |      compatibility(    |
+       |      scope_A, scope_B)   |        scope_B, scope_A)|
+       |  Exclusion / permission /|    Exclusion / perm /  |
+       |  mode intersection.      |    mode intersection.  |
+       |  FAIL → abort early      |    FAIL → reject       |
+       |  (no crypto, no probes)  |    (Verdict::Rejected) |
        |                          |                        |
        |   ---- PHASE 1: Self-Attest (parallel) ----      |
        |                          |                        |
@@ -314,6 +326,8 @@ derived from the public key, never manually assigned.
     max_drift_accepted: f32,
     roles: Vec<String>,
     expected_model_hash: Option<[u8; 32]>,  // pin model identity
+    certificate: Option<AgentCertificate>,  // optional CA-signed binding
+    domain_scope: Option<DomainScope>,      // §4: declared competence
   }
 
   TrustRegistry {
@@ -323,6 +337,125 @@ derived from the public key, never manually assigned.
     max_attestation_age_secs: u64,    // defence-in-depth
   }
 ```
+
+---
+
+## 5b. Domain Scoping (Implemented — Protocol §4 / Appendix B)
+
+The `got-wire::domain` module implements the structural Phase 0 layer
+specified in §4 of the protocol companion paper. Each `AgentEntry` may
+carry an optional `DomainScope` declaring the agent's primary domain
+of competence, the patterns it is permitted to interact with, and an
+exclusion list. When **both** peers declare a scope, the bidirectional
+compatibility check runs immediately after registry lookup — *before*
+envelope verification, attestation signature checks, chain walking, or
+geometric threshold checks. When either peer is unscoped, the check is
+skipped (backwards compatible with PoC registries).
+
+Domain incompatibility is structural: it cannot be overridden by high
+probe readings, certificate elevation, or governance dispensation.
+
+```
+  Domain types
+  ============
+
+  Domain(String)              // dot-separated lowercase namespace
+                              // e.g. "agriculture.crop-management"
+                              // strict parser: [a-z0-9.-], no empty
+                              // segments, no leading/trailing dot
+
+  DomainPattern               // exact / sub-tree wildcard / global
+    "agriculture.crop-management"   exact
+    "agriculture.*"                 sub-tree (matches the parent too)
+    "*"                             global wildcard
+    Substring guard: "agriculture-x" does NOT match "agriculture.*"
+
+  InteractionMode             // §4.2
+    ReadOnly                  // receive only
+    Advisory                  // non-binding recommendations
+    Cooperative               // joint decision-making
+
+  PermittedDomain { pattern, mode }
+
+  DomainScope {
+    primary:    Domain,
+    permitted:  Vec<PermittedDomain>,
+    exclusions: Vec<DomainPattern>,
+  }
+```
+
+Mode lookup uses **most-specific-pattern wins** — an exact pattern
+beats any wildcard, and a longer wildcard prefix beats a shorter one.
+
+```
+  check_domain_compatibility(a: &DomainScope, b: &DomainScope)
+    → Result<(), WireError>
+
+    1. Exclusions (hard veto, both directions)
+         a.is_excluded(b.primary)  → DomainExcluded
+         b.is_excluded(a.primary)  → DomainExcluded
+
+    2. Bidirectional permission
+         a.mode_for(b.primary)     → DomainNotPermitted if None
+         b.mode_for(a.primary)     → DomainNotPermitted if None
+
+    3. Mode intersection non-empty
+         (ReadOnly, ReadOnly)      → DomainModeIncompatible
+         (any other pair)          → OK
+```
+
+### Wired into the exchange
+
+`validate_request` and `validate_response` run the check at "Phase 0"
+— immediately after the sender lookup and certificate validation, and
+before envelope verification:
+
+```rust
+if let Some(self_entry) = registry.lookup(own_agent_id) {
+    if let (Some(peer_scope), Some(self_scope)) =
+        (entry.domain_scope.as_ref(), self_entry.domain_scope.as_ref())
+    {
+        if let Err(e) = check_domain_compatibility(peer_scope, self_scope) {
+            return Ok((Verdict::Rejected, format!("domain incompatible: {e}")));
+        }
+    }
+}
+```
+
+### TOML
+
+Domain scope is declared per-agent as inline tables in the registry
+TOML. Permitted/exclusion lists are rejected at parse time if the
+agent has no `primary_domain`.
+
+```toml
+[[agents]]
+name = "alice"
+public_key = "aabb..."
+primary_domain = "agriculture.crop-management"
+exclusion_domains = ["transport.*"]
+permitted_domains = [
+  { pattern = "agriculture.*", mode = "cooperative" },
+  { pattern = "meteorology.*", mode = "advisory" },
+]
+
+[[agents]]
+name = "vehicle-controller"
+public_key = "ccdd..."
+primary_domain = "transport.autonomous-vehicle"
+permitted_domains = [
+  { pattern = "transport.*", mode = "cooperative" },
+  { pattern = "infrastructure.traffic-management", mode = "cooperative" },
+]
+```
+
+### Use cases (from the protocol paper)
+
+| Pair | Result | Failure / mode |
+|---|---|---|
+| §5.1 agriculture.crop-management ↔ transport.autonomous-vehicle | **Rejected at Phase 0** | `DomainExcluded` (also `DomainNotPermitted` without the exclusion) |
+| §5.2 healthcare.diagnostic-advisory ↔ healthcare.drug-interaction | Accepted | Asymmetric: `Advisory` ↔ `ReadOnly` |
+| §5.3 supply-chain peers within `agriculture.*` | Accepted | `Cooperative` ↔ `Cooperative` |
 
 ---
 
@@ -402,6 +535,10 @@ summary. This avoids O(n²) pairwise verification:
 | NaN/Inf in fields | `AttestationError::NaN` or `Infinity` | Reject, corrupt data |
 | Integrity violation | `IntegrityViolation { layer, pos }` | Reject, hardware capture tampered |
 | Registry integrity fail | `RegistryIntegrity { expected, actual }` | Reject, registry file tampered (S-2) |
+| Domain excluded | `DomainExcluded { excluder, target }` | Reject at Phase 0, structural — cannot be overridden |
+| Domain not permitted | `DomainNotPermitted { from, target }` | Reject at Phase 0, peer outside declared scope |
+| Modes incompatible | `DomainModeIncompatible { a, b }` | Reject at Phase 0, both peers ReadOnly |
+| Domain parse error | `DomainParse(String)` | Reject registry load (malformed domain or pattern) |
 | Payload too large | `PayloadTooLarge { size, limit }` | Reject frame (N-1) |
 | Timestamp future | `TimestampFuture { delta, max }` | Reject, clock skew (S-7) |
 | String field too large | `FieldTooLarge { field, size, max }` | Reject attestation (S-13) |
@@ -459,8 +596,9 @@ The wire protocol uses length-prefixed binary framing, implemented in
 | Causal check | `causal_check(probe, h, geom, δ, model_fn, thresh)` | `got-probe::intervention` | — |
 | Build exchange request | `build_request(nonce, peer_id, sk, chain, current)` | `got-wire::exchange` | — |
 | Build exchange response | `build_response(nonce, peer_id, sk, verdict, ...)` | `got-wire::exchange` | — |
-| Validate request | `validate_request(req, own_id, nonce, registry)` | `got-wire::exchange` | S-2 |
-| Validate response | `validate_response(rsp, own_id, nonce, registry)` | `got-wire::exchange` | S-2 |
+| Validate request | `validate_request(req, own_id, nonce, registry)` | `got-wire::exchange` | S-2, §4 Phase 0 |
+| Validate response | `validate_response(rsp, own_id, nonce, registry)` | `got-wire::exchange` | S-2, §4 Phase 0 |
+| Domain compatibility check | `check_domain_compatibility(scope_a, scope_b)` | `got-wire::domain` | §4 / Appendix B |
 | Full in-memory exchange | `perform_exchange(init_key, ..., resp_key, ..., registry)` | `got-wire::exchange` | S-2, S-8, S-9 |
 | Envelope create | `ExchangeEnvelope::create()` | `got-wire::envelope` | S-9: verified=true |
 | Envelope verify | `envelope.verify()` | `got-wire::envelope` | S-9: sets verified |
@@ -494,6 +632,10 @@ The wire protocol uses length-prefixed binary framing, implemented in
   proof of geometry would be needed for adversarial robustness.
 - **Group attestation struct** — the aggregator pattern is described but
   `GroupAttestation` is not yet implemented as a struct.
+- **Standardised domain taxonomy** — `got-wire::domain` enforces whatever
+  hierarchy the trust registry declares, but the canonical taxonomy of
+  competence domains (who maintains it, how new domains are added,
+  dispute resolution) remains a governance question outside the protocol.
 - **Real hardware TEE** — `MockEnclave` provides the abstraction but actual
   SGX/SEV/H100 integration is not implemented.
 

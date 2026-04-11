@@ -174,9 +174,17 @@ Step 2: PROBE CHIP                         Step 6: WIRE OUT
 Step 3: ATTEST CHIP                          lookup(agent_id) → AgentEntry
   assemble_and_sign(                         S-2: SHA-256 verified on load
     attestation, &signing_key)               check: max_attestation_age_secs
-  S-7: timestamp ≤ 300s future                      │
-  S-13: strings ≤ 256 bytes                         ▼
-  S-20: layers ≤ 1024                       Step 9: ENVELOPE CHIP (peer)
+  S-7: timestamp ≤ 300s future               §4 Phase 0:
+  S-13: strings ≤ 256 bytes                    check_domain_compatibility(
+  S-20: layers ≤ 1024                            peer_scope, self_scope)
+                                                 → DomainExcluded /
+                                                   DomainNotPermitted /
+                                                   DomainModeIncompatible
+                                                 (skipped if either side
+                                                  has no scope declared)
+                                                    │
+                                                    ▼
+                                            Step 9: ENVELOPE CHIP (peer)
   v1/v2/v3 schema selection                  verify(envelope, pk_sender)
   UnsignedAttestation → sign                 S-9: from_bytes_verified()
   → GeometricAttestation (signed)            check: nonce, peer_id,

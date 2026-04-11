@@ -126,8 +126,15 @@ All layers incorporate defence-in-depth measures hardened during the security au
 |    S-2: SHA-256 integrity on load |
 |    AgentEntry { agent_id,         |
 |      expected_model_hash,         |
-|      max_drift_accepted, roles }  |
+|      max_drift_accepted, roles,   |
+|      domain_scope }               |
 |    max_attestation_age_secs       |
+|                                   |
+|  Domain scoping (§4):             |
+|    DomainScope { primary,         |
+|      permitted, exclusions }      |
+|    check_domain_compatibility()   |
+|    → Phase 0, before crypto       |
 +===================================+
         |
         v
@@ -342,7 +349,8 @@ Network exchange layer. Depends on got-core and got-attest:
 - **`ExchangeEnvelope`** — signed 200-byte envelope (S-9: `verified` flag, `from_bytes_verified()`, `is_verified()`)
 - **`verify_chain`** — walk chain, check parent linkage, enforce drift (S-8: `&[VerifyingKey]` for key rotation)
 - **`TrustRegistry`** — TOML config (S-2: SHA-256 integrity on load; `max_attestation_age_secs`)
-- **`AgentEntry`** — name, public_key, agent_id, max_drift_accepted, roles, expected_model_hash
+- **`AgentEntry`** — name, public_key, agent_id, max_drift_accepted, roles, expected_model_hash, certificate, domain_scope
+- **`DomainScope`** (`got-wire::domain`) — primary `Domain`, `Vec<PermittedDomain>` (with `InteractionMode`), exclusion patterns. `check_domain_compatibility()` runs at Phase 0 in `validate_request` / `validate_response`, before any cryptographic or geometric verification (Protocol §4 / Appendix B)
 
 ### Layer 3b — Attestation Store (`got-store`)
 
