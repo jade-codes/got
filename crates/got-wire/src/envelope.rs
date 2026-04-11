@@ -301,6 +301,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         }
     }

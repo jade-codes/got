@@ -115,7 +115,7 @@ enum Command {
         /// If omitted, model_hash is zeroed.
         #[arg(long)]
         shards: Option<PathBuf>,
-        /// Path to parent attestation JSON (for chained v2 attestations).
+        /// Path to parent attestation JSON (for chained attestations).
         #[arg(long)]
         chain_parent: Option<PathBuf>,
         /// Path to reference geometry checkpoint (.gotgeo) for drift measurement.
@@ -825,13 +825,11 @@ fn cmd_attest(
         InnerProduct::CausalRegularised { epsilon }
     };
 
-    // --- Chaining support (v2) ---
+    // --- Chaining support ---
+    // `is_chained` controls whether we populate parent_attestation_hash and
+    // geometry_hash; the schema version itself is a single constant.
     let is_chained = chain_parent_path.is_some() || geo_ref_path.is_some();
-    let schema_version = if is_chained {
-        got_core::SCHEMA_VERSION_2
-    } else {
-        SCHEMA_VERSION
-    };
+    let schema_version = SCHEMA_VERSION;
 
     let (parent_attestation_hash, parent_sequence_number) =
         if let Some(ref parent_path) = chain_parent_path {
@@ -852,7 +850,7 @@ fn cmd_attest(
             .context("drift computation failed")?;
         (Some(geometry.geometry_hash()), Some(drift))
     } else if is_chained {
-        // v2 without explicit reference: record geometry hash, drift = 0.0
+        // Chained without an explicit reference: record geometry hash, drift = 0.0.
         (Some(geometry.geometry_hash()), Some(0.0))
     } else {
         (None, None)
@@ -916,6 +914,7 @@ fn cmd_attest(
         probe_commitment,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
 
@@ -970,7 +969,7 @@ fn cmd_verify(attestation_path: PathBuf, pubkey_path: PathBuf) -> Result<()> {
                 attestation.coverage_flags.len()
             );
             println!("  divergence:     {}", attestation.divergence_flag);
-            // v2 chaining info
+            // Chaining info
             if let Some(ref parent_hash) = attestation.parent_attestation_hash {
                 let hex: String = parent_hash.iter().map(|b| format!("{b:02x}")).collect();
                 println!("  parent_hash:    {hex}");

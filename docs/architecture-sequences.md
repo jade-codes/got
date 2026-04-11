@@ -93,10 +93,13 @@ behavioural properties.
    |-- persist probes    |                  |                    |
 ```
 
-## 4. Self-Attestation (v1 — Frozen Model)
+## 4. Tier-1 Self-Attestation (Frozen Model, No Chain)
 
 An agent produces a signed attestation about its own model's current
-behaviour. This is the first link in any attestation chain.
+behaviour. This is the first link in any attestation chain. All
+attestations share a single canonical wire format
+(`SCHEMA_VERSION == 1`); a Tier-1 attestation is simply one whose
+chain and causal fields are empty.
 
 ```
   Agent          Geometry     got-probe      got-attest       Ed25519
@@ -118,7 +121,7 @@ behaviour. This is the first link in any attestation chain.
    |    if shards absent)       |              |               |
    |               |             |              |               |
    |-- fill GeometricAttestation               |               |
-   |   { schema_version: 1,     |              |               |
+   |   { schema_version: SCHEMA_VERSION,       |               |
    |     model_hash: Option,    |              |               |
    |     parent_attestation_hash: None,        |               |
    |     geometry_hash: H(Φ),  |              |               |
@@ -135,11 +138,13 @@ behaviour. This is the first link in any attestation chain.
    |<- Signed GeometricAttestation ------------|               |
 ```
 
-## 5. Chained Self-Attestation (v2 — After Model Update)
+## 5. Tier-2 Chained Self-Attestation (After Model Update)
 
 When an agent's model self-learns, it produces a chained attestation
 linked to the previous one, with drift measured against the reference
-geometry.
+geometry.  "Tier 2" is derived from the content — the attestation
+populates `parent_attestation_hash`, `geometry_hash`, and
+`geometry_drift`.
 
 ```
   Agent          Geometry_new   Geometry_ref   got-probe       got-attest
@@ -165,7 +170,7 @@ geometry.
    |<- (raw, conf, flag) or ProbeStale -----------|               |
    |                 |              |              |               |
    |-- fill GeometricAttestation   |              |               |
-   |   { schema_version: 2,       |              |               |
+   |   { schema_version: SCHEMA_VERSION,         |               |
    |     parent_attestation_hash:  |              |               |
    |       attestation_hash(prev), |              |               |
    |     geometry_hash: H(Φ_new), |              |               |
@@ -173,18 +178,20 @@ geometry.
    |                 |              |              |               |
    |-- assemble_and_sign(attest, sk) ------------|--------------->
    |   (S-7/S-13/S-20 gates)     |              |               |
-   |<- Signed v2 Attestation -----|              |               |
+   |<- Signed Tier-2 chained att --|              |               |
 ```
 
-## 6. Causal Self-Attestation (v3 — With Intervention)
+## 6. Tier-3 Causal Self-Attestation (With Intervention)
 
-Extends v2 with causal intervention checks that prove the probed
-directions are causally linked to model output.
+Extends the Tier-2 chained shape with causal intervention checks that
+prove the probed directions are causally linked to model output. The
+attestation is "Tier 3" when `causal_scores` is non-empty and every
+record has `is_causal == true`.
 
 ```
   Agent        Geometry   got-probe/intervention    got-attest    Ed25519
    |              |              |                      |            |
-   |  (v2 steps above)          |                      |            |
+   |  (Tier-2 steps above)      |                      |            |
    |              |              |                      |            |
    |-- causal_check(probe, h,   |                      |            |
    |     geometry, δ, model_fn, |                      |            |
@@ -207,17 +214,17 @@ directions are causally linked to model output.
    |     consistency, is_causal, perturbation_delta } --|            |
    |              |              |                      |            |
    |-- fill GeometricAttestation |                      |            |
-   |   { schema_version: 3,     |                      |            |
-   |     (all v2 fields) +      |                      |            |
+   |   { schema_version: SCHEMA_VERSION,               |            |
+   |     (all Tier-2 fields) +  |                      |            |
    |     causal_scores: [...],  |                      |            |
    |     intervention_delta: δ, |                      |            |
    |     causal_flag: all_pass }|                      |            |
    |              |              |                      |            |
    |-- assemble_and_sign(attest, sk) ----------------->|            |
-   |              |              |   serialise v3 branch|            |
-   |              |              |   (includes causal   |-- sign -->|
-   |              |              |    scores in canon.) |<- sig ----|
-   |<- Signed v3 Attestation --|                      |            |
+   |              |              |   linear canonical   |            |
+   |              |              |   LE bytes           |-- sign -->|
+   |              |              |                      |<- sig ----|
+   |<- Signed Tier-3 attestation |                      |            |
 ```
 
 ## 7. Hardware Enclave Attestation Pipeline
@@ -300,10 +307,18 @@ cooperating. This is the fundamental agent-to-agent protocol.
        |                           |   §4 Phase 0:          |
        |                           |     check_domain_      |
        |                           |     compatibility(     |
-       |                           |       peer, self) — if |
-       |                           |     either side fails  |
-       |                           |     → Verdict::Rejected|
-       |                           |     before envelope    |
+       |                           |       peer, self)      |
+       |                           |     Supervised (§5.5) OK|
+       |                           |   §7.3/§8.2 governance:|
+       |                           |     effective_         |
+       |                           |       thresholds +     |
+       |                           |     enforce_governance |
+       |                           |     (require_chain,    |
+       |                           |      require_causal_   |
+       |                           |        validation)     |
+       |                           |   §2.1 scope binding:  |
+       |                           |     check_attestation_ |
+       |                           |       scope_binding    |
        |                           |                        |
        |                           |   build_response(      |
        |                           |     nonce, id_A,       |
@@ -326,7 +341,7 @@ cooperating. This is the fundamental agent-to-agent protocol.
        |     timestamp fresh       |     timestamp fresh     |
        |     S-9: verified=true    |     S-9: verified=true  |
        |                           |                        |
-       |   Chain verify (v2/v3):   |   Chain verify:         |
+       |   Chain verify (if chained):  Chain verify:         |
        |     verify_chain(         |     verify_chain(       |
        |       chain, current,     |       chain, current,   |
        |       &[pk_B], max_drift) |       &[pk_A], max_drift)|
@@ -363,7 +378,8 @@ against **all** keys in `signer_pks` (supports key rotation).
      |   verify(attest_i,       |                        |
      |     any key in pks) -----|----------------------->|
      |                          |   serialise_for_signing|
-     |                          |   (v1, v2, or v3)     |
+     |                          |   (linear canonical    |
+     |                          |    bytes)              |
      |                          |   Ed25519 verify       |
      |<-- sig_valid ------------|                        |
      |                          |                        |

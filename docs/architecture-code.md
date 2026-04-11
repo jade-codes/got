@@ -74,17 +74,37 @@ layer adds one guarantee on top of the layers below it.
 │                                │ │    S-2: SHA-256 integrity on load    │
 │                                │ │    AgentEntry + expected_model_hash  │
 │                                │ │    + domain_scope (Option)           │
+│                                │ │    + governance_table                │
 │                                │ │    max_attestation_age_secs          │
 │                                │ │  agent_id = SHA-256(public_key)      │
 │                                │ │                                      │
 │                                │ │  Domain scoping (§4 / Appendix B):   │
 │                                │ │    Domain / DomainPattern            │
-│                                │ │    InteractionMode                   │
+│                                │ │    InteractionMode { ReadOnly,       │
+│                                │ │      Advisory, Cooperative,          │
+│                                │ │      Supervised (§5.5) }             │
 │                                │ │    DomainScope { primary,            │
 │                                │ │      permitted, exclusions }         │
 │                                │ │    check_domain_compatibility()      │
 │                                │ │    → Phase 0 in validate_request /   │
 │                                │ │      validate_response (before crypto)│
+│                                │ │                                      │
+│                                │ │  Governance (§7.3 / §8.2):           │
+│                                │ │    GovernanceThresholds {            │
+│                                │ │      max_drift, min_confidence,      │
+│                                │ │      min_causal_score,               │
+│                                │ │      require_chain,                  │
+│                                │ │      require_causal_validation }     │
+│                                │ │    most-specific-pattern lookup      │
+│                                │ │                                      │
+│                                │ │  Supervised (§5.5):                  │
+│                                │ │    perform_supervised_request()      │
+│                                │ │    one-directional regulator flow    │
+│                                │ │                                      │
+│                                │ │  Attestation scope binding (§2.1):   │
+│                                │ │    check_attestation_scope_binding() │
+│                                │ │    embedded DomainScopeDeclaration   │
+│                                │ │    cross-checked vs registry         │
 └────────┬───────────────────────┘ └──────┬───────────────────────────────┘
          │                                │
          v                                v
@@ -95,17 +115,19 @@ layer adds one guarantee on top of the layers below it.
 │    S-7:  timestamp ≤ now+300s       |                                  │
 │    S-13: string fields ≤ 256 B      v                                  │
 │    S-20: ≤ 1024 layers,       serialise_for_signing()                  │
-│          ≤ 65536 readings     (same function, canonical bytes)         │
-│         │                     (v1: original fields)                    │
-│         v                     (v2: + parent hash,                      │
-│  serialise_for_signing()       geo hash, drift)                        │
-│  (v1–v4 branches)            (v3: + causal scores,                    │
-│                                intervention_delta,                     │
-│  attestation_hash()            causal_flag)                            │
-│  sha256(canonical bytes)     (v4: + density_reading,                   │
-│                                curvature_reading)                      │
-│  merkle_root()               is_supported_schema()                     │
-│  (RFC 6962 domain sep)       {1, 2, 3, 4} → true                     │
+│          ≤ 65536 readings     LINEAR (no version branches):            │
+│         │                       schema_version                         │
+│         v                       model/precision/input/time             │
+│  serialise_for_signing()        readings / confidence / coverage       │
+│  (single canonical layout)      parent_hash, geometry_hash, drift      │
+│                                 causal_scores, intervention_delta      │
+│  attestation_hash()             sequence_number, directional_drifts    │
+│  sha256(canonical bytes)        probe_commitment                       │
+│                                 density_reading, curvature_reading     │
+│  merkle_root()                  domain_scope_declaration (§2.1)        │
+│  (RFC 6962 domain sep)                                                 │
+│                              is_supported_schema() == 1                │
+│                              (trust tiers = content-based)            │
 │                                                                        │
 └───────────────┬────────────────────────────────────────────────────────┘
                 │
@@ -155,7 +177,7 @@ layer adds one guarantee on top of the layers below it.
 │                                                                        │
 │  ┌─ geometry.rs ─────────────────────────────┐                         │
 │  │                                           │  GeometricAttestation   │
-│  │  CausalGeometry                           │  schema_version 1|2|3|4 │
+│  │  CausalGeometry                           │  schema_version = 1     │
 │  │    ├── from_unembedding(U, eps)           │    S-21: model_hash     │
 │  │    │     Phi = U^T U  (+eps*I)            │      Option<[u8; 32]>   │
 │  │    ├── from_raw_gram(data, d)             │    parent_attest_hash   │
@@ -212,9 +234,9 @@ layer adds one guarantee on top of the layers below it.
 
 | Crate | Type | Purpose |
 |-------|------|---------|
-| `got-core` | lib | Core types (`GeometricAttestation` v1+v2+v3, `UnsignedAttestation`, `CausalScoreRecord`, `DirectionalDrift`, `UnembeddingMatrix`, `Precision`, `InnerProduct`), causal geometry (`CausalGeometry`, Gram matrix, inner product, geometry hash, drift), `sha256()`, hex serde helpers |
+| `got-core` | lib | Core types (`GeometricAttestation` single canonical layout, `UnsignedAttestation`, `CausalScoreRecord`, `DirectionalDrift`, `DomainScopeDeclaration` / `PermittedDomainDeclaration` / `InteractionModeTag`, `UnembeddingMatrix`, `Precision`, `InnerProduct`), causal geometry (`CausalGeometry`, Gram matrix, inner product, geometry hash, drift), `sha256()`, hex serde helpers |
 | `got-probe` | lib | Probe training (SGD under causal IP), inference (`read_probe`), drift-aware inference (`read_probe_checked`), `ProbeSet` with geometry binding; causal intervention (`causal_check`, `CausalScore`, multi-layer); measurement hooks (`MeasurementSidecar`, `CollectingHook` with mutex poison recovery, `ActivationStats`, `detect_distribution_shift`) |
-| `got-attest` | lib | Attestation signing/verification (Ed25519, v1+v2+v3) with bounds checking (S-7 timestamp, S-13 strings, S-20 arrays), canonical serialisation, attestation hashing for chain linkage, Merkle tree (SHA-256 + RFC 6962) |
+| `got-attest` | lib | Attestation signing/verification (Ed25519, single canonical layout) with bounds checking (S-7 timestamp, S-13 strings, S-20 arrays), linear canonical serialisation, attestation hashing for chain linkage, Merkle tree (SHA-256 + RFC 6962) |
 | `got-wire` | lib | Wire protocol framing (`Frame` with Result-returning encode — N-1, `MessageType`), signed exchange envelopes (`ExchangeEnvelope` with verified flag — S-9, `from_bytes_verified()`), request/response exchange (`ExchangeRequest`, `ExchangeResponse`, `perform_exchange`), chain verification (`verify_chain` with `&[VerifyingKey]` — S-8), trust registry (`TrustRegistry` with SHA-256 integrity — S-2, `expected_model_hash`, `max_attestation_age_secs`) |
 | `got-enclave` | lib | Hardware isolation abstraction (`HardwareCapture`, `MockDmaTap`), measurement enclave (`MeasurementEnclave` trait, `MockEnclave`), `ActivationFrame` with integrity hashing, `enclave_pipeline()` end-to-end |
 | `got-store` | lib | Attestation persistence (`AttestationStore` trait), `MemoryStore` (in-memory), `FileStore` (on-disk JSON with atomic writes + hash-on-load), content-addressed storage (`StoreId`), filtering (`StoreFilter`), audit reporting (`AuditReport`, `DriftSummary`, `CausalSummary`) |

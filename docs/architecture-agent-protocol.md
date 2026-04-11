@@ -25,6 +25,9 @@ All protocol paths reflect the security-hardened codebase (353 tests passing).
 | A7 | Hardware enclave keeps signing key inside trust boundary | Key never exposed to application layer |
 | A8 | Chain verification accepts multiple signer keys | S-8: supports key rotation across chain boundaries |
 | A9 | Each agent declares a domain scope (primary domain, permitted patterns, exclusions) | §4 / Appendix B: enforces structural cross-domain boundaries before any cryptographic verification |
+| A10 | Governance thresholds are attached per-domain to a verifier, not per-peer | §7.3 / §8.2: a healthcare regulator holds *all* peers in `healthcare.*` to Tier-3 causal validation; a commercial supply-chain agent accepts looser drift bounds |
+| A11 | Attestations may embed their own domain scope declaration | §2.1: the binding travels inside the signed payload so a relayed attestation carries its domain claim with it; verifier cross-checks against the registry |
+| A12 | Regulatory oversight is asymmetric | §5.5: `InteractionMode::Supervised` pairs a regulator (no attestation of its own) with a supervised agent (full attestation) through `perform_supervised_request()` |
 
 ---
 
@@ -110,7 +113,7 @@ The exchange protocol is implemented in `got-wire::exchange`:
        |     timestamp freshness  |      timestamp freshness|
        |     S-9: verified=true   |      S-9: verified=true|
        |                          |                        |
-       |   If chain (v2/v3):      |    If chain:           |
+       |   If chain (chained):    |    If chain:           |
        |     verify_chain(        |      verify_chain(     |
        |       chain, current,    |        chain, current, |
        |       &[pk_B], max_drift)|        &[pk_A], max_drift)|
@@ -189,8 +192,9 @@ S-9 hardening: the envelope has a `verified: bool` field (private).
 ## 4. Chained Attestation in Agent-to-Agent Context
 
 When an agent self-learns (updates its weights), it must produce a chained
-attestation (schema v2 or v3) and present the full chain to peers. The peer
-walks the chain to decide whether the model has drifted acceptably.
+attestation (`parent_attestation_hash = Some(H(prev))`) and present the
+full chain to peers. The peer walks the chain to decide whether the
+model has drifted acceptably.
 
 Chain verification is implemented in `got-wire::chain::verify_chain()`.
 S-8: accepts `signer_pks: &[VerifyingKey]` — each attestation need only
@@ -204,12 +208,12 @@ verify against **at least one** key in the set, supporting key rotation.
        |-- checkpoint Φ₀ (.gotgeo)           |
        |-- train probes against Φ₀           |
        |-- attest₀:                          |
-       |     schema_version: 1 or 3          |
+       |     schema_version: SCHEMA_VERSION   |
        |     parent_hash: None               |
        |     geometry_hash: H(Φ₀)           |
        |     geometry_drift: 0.0              |
        |     model_hash: Option (S-21)       |
-       |     causal_scores: [...] (if v3)    |
+       |     causal_scores: [...] (if Tier 3)|
        |-- assemble_and_sign(attest₀, sk_A) |
        |     S-7/S-13/S-20 gates             |
        |                                      |
@@ -323,11 +327,14 @@ derived from the public key, never manually assigned.
     name: String,
     public_key: VerifyingKey,
     agent_id: [u8; 32],           // SHA-256(public_key.as_bytes())
-    max_drift_accepted: f32,
+    max_drift_accepted: f32,      // flat fallback when no governance
     roles: Vec<String>,
     expected_model_hash: Option<[u8; 32]>,  // pin model identity
     certificate: Option<AgentCertificate>,  // optional CA-signed binding
     domain_scope: Option<DomainScope>,      // §4: declared competence
+    governance_table: GovernanceTable,      // §7.3 / §8.2: per-domain
+                                            //   overrides for max_drift,
+                                            //   min_confidence, tier reqs
   }
 
   TrustRegistry {
@@ -456,6 +463,167 @@ permitted_domains = [
 | §5.1 agriculture.crop-management ↔ transport.autonomous-vehicle | **Rejected at Phase 0** | `DomainExcluded` (also `DomainNotPermitted` without the exclusion) |
 | §5.2 healthcare.diagnostic-advisory ↔ healthcare.drug-interaction | Accepted | Asymmetric: `Advisory` ↔ `ReadOnly` |
 | §5.3 supply-chain peers within `agriculture.*` | Accepted | `Cooperative` ↔ `Cooperative` |
+| §5.5 finance.regulatory-compliance ↔ finance.trading | Accepted (one-way) | `Supervised` ↔ `Supervised` via `perform_supervised_request` |
+
+---
+
+## 5c. Per-Domain Governance Thresholds (Implemented — Protocol §7.3 / §8.2)
+
+Domain compatibility (§5b) decides *whether* two agents are allowed to
+exchange at all.  Governance thresholds decide *how strictly* the verifier
+holds the peer's attestation to quantitative bounds once the exchange is
+allowed.  The two layers are orthogonal: §4 is structural, §7.3/§8.2 is
+quantitative policy.
+
+Each `AgentEntry` holds a `GovernanceTable` keyed by `DomainPattern`.
+When a verifier receives an attestation from a peer, it looks up the
+most-specific pattern matching the peer's primary domain and applies
+the resolved `GovernanceThresholds` to the incoming payload.  When no
+pattern matches (or the peer is unscoped), the verifier falls back to
+`GovernanceThresholds::permissive(entry.max_drift_accepted)` which is
+behaviourally identical to the pre-§8.2 PoC path.
+
+```
+  GovernanceThresholds {
+    max_drift:                 f32,     // Frobenius drift bound (§7.3)
+    min_confidence:            f32,     // minimum per-reading confidence
+    min_causal_score:    Option<f32>,   // lowest acceptable causal
+                                        //   consistency (§5.4 critical
+                                        //   infra → 0.85)
+    require_chain:             bool,    // Tier 2+: parent_hash must be set
+    require_causal_validation: bool,    // Tier 3: non-empty causal_scores
+                                        //   with every record is_causal
+  }
+```
+
+Trust tiers are *content*-based, not version-gated.  The paper's
+Tier 1 / Tier 2 / Tier 3 distinction is derived by inspecting which
+fields the attestation populates:
+
+- **Tier 1** = any signed attestation (always holds if `got_attest::verify`
+  succeeds).
+- **Tier 2** = `parent_attestation_hash.is_some()` — the attestation
+  belongs to a chain.
+- **Tier 3** = non-empty `causal_scores` with every record having
+  `is_causal == true` — causal validation passed.
+
+`enforce_governance` in `got-wire::exchange` applies these checks
+immediately before chain verification. The resolved `max_drift` also
+replaces `entry.max_drift_accepted` in the call to `verify_chain`.
+
+### TOML
+
+```toml
+[[agents]]
+name = "healthcare-regulator"
+public_key = "..."
+primary_domain = "healthcare.regulator"
+permitted_domains = [
+  { pattern = "healthcare.*", mode = "cooperative" },
+]
+
+# Any peer in healthcare.drug-interaction must be Tier 3 with tight drift.
+[[agents.governance_thresholds]]
+pattern = "healthcare.drug-interaction"
+max_drift = 0.02
+min_confidence = 0.8
+min_causal_score = 0.85
+require_causal_validation = true
+
+# Everything else in healthcare.* gets looser bounds.
+[[agents.governance_thresholds]]
+pattern = "healthcare.*"
+max_drift = 0.05
+```
+
+### Domain-specific drift bounds (§7.3 indicative)
+
+| Domain | `max_drift` | `require_causal_validation` |
+|---|---|---|
+| Critical infrastructure | 0.02 | true |
+| Healthcare | 0.03 | true |
+| Finance (regulated) | 0.05 | true |
+| Commercial supply chain | 0.10 | false |
+| Research / experimental | 0.25 | false |
+
+---
+
+## 5d. Supervised Mode (Implemented — Protocol §5.5)
+
+A regulator (Agent M) may demand attestations from a supervised agent
+(Agent L) without producing one of its own.  The regulator's authority
+derives from institutional mandate, not from mutual geometric
+compatibility, so the exchange is one-directional by construction.
+
+`InteractionMode::Supervised` sits alongside `ReadOnly`, `Advisory`,
+and `Cooperative` in the domain-scope machinery.  When both sides
+declare the other's primary domain in `Supervised` mode, the Phase 0
+compatibility check passes; the paired `(Supervised, Supervised)` mode
+is the only asymmetry the paper requires.
+
+The helper that drives this flow is `perform_supervised_request`:
+
+```
+  perform_supervised_request(
+    regulator_id:        &[u8; 32],   // Agent M, never attests
+    supervised_key:      &SigningKey, // Agent L
+    supervised_chain:    Vec<GeometricAttestation>,
+    supervised_current:  GeometricAttestation,
+    registry:            &TrustRegistry,
+  ) -> Result<(Verdict, String), WireError>
+```
+
+The supervised agent signs a normal envelope + attestation and sends
+it; the regulator runs `validate_request` exactly as in a symmetric
+exchange (Phase 0 domain check, envelope verify, attestation sig,
+chain, governance thresholds, attestation-registry scope binding).
+No response attestation is produced — the flow returns a bare verdict.
+
+---
+
+## 5e. Embedded Domain Scope Declaration (Implemented — Protocol §2.1)
+
+The `GeometricAttestation` struct carries an optional
+`domain_scope_declaration: Option<DomainScopeDeclaration>` that
+travels inside the signed canonical bytes.  This binds the agent's
+declared competence to the attestation itself — a relayed attestation
+carries its domain claim with it, and a verifier can compare the
+embedded declaration against its registry's entry for the same agent.
+
+```
+  DomainScopeDeclaration {
+    primary:    String,                          // "agriculture.crop-management"
+    permitted:  Vec<PermittedDomainDeclaration>, // pattern + mode tag
+    exclusions: Vec<String>,                     // pattern strings
+  }
+
+  PermittedDomainDeclaration {
+    pattern: String,
+    mode:    InteractionModeTag,   // u8, stable on the wire
+  }
+```
+
+The wire-level types live in `got-core` (not `got-wire`) because the
+payload needs to participate in canonical signing without pulling a
+dependency from core up into wire.  `got-wire::domain::DomainScope`
+provides `to_declaration()` / `from_declaration()` to marshal between
+the rich structured form and the wire-level mirror.
+
+`check_attestation_scope_binding` in `got-wire::exchange` runs
+immediately after `enforce_governance`:
+
+- If `attestation.domain_scope_declaration.is_none()` → pass through.
+- If the embedded declaration is malformed (fails `Domain::parse` or
+  `DomainPattern::parse`) → reject with a parse error.
+- If the embedded declaration is present but the registry has no
+  `domain_scope` for the agent → reject (the agent claims a domain the
+  registry does not vouch for).
+- If both are present but they disagree on primary / permitted /
+  exclusions after canonical string comparison → reject.
+
+The canonical string comparison is order-insensitive for the permitted
+and exclusion lists so that governance-curated sorting does not cause
+spurious mismatches.
 
 ---
 
@@ -539,6 +707,10 @@ summary. This avoids O(n²) pairwise verification:
 | Domain not permitted | `DomainNotPermitted { from, target }` | Reject at Phase 0, peer outside declared scope |
 | Modes incompatible | `DomainModeIncompatible { a, b }` | Reject at Phase 0, both peers ReadOnly |
 | Domain parse error | `DomainParse(String)` | Reject registry load (malformed domain or pattern) |
+| Chain required but missing | reason: "chain required for domain …" | §8.2 `require_chain`, Tier 2+ mandate |
+| Causal validation required but missing | reason: "causal validation required for domain …" | §8.2 `require_causal_validation`, Tier 3 mandate |
+| Confidence below min | reason: "confidence X below minimum Y …" | §8.2 `min_confidence` |
+| Attestation scope ↔ registry mismatch | reason: "attestation domain_scope_declaration (…) disagrees with registry (…)" | §2.1, catches relay and misconfiguration |
 | Payload too large | `PayloadTooLarge { size, limit }` | Reject frame (N-1) |
 | Timestamp future | `TimestampFuture { delta, max }` | Reject, clock skew (S-7) |
 | String field too large | `FieldTooLarge { field, size, max }` | Reject attestation (S-13) |
@@ -596,9 +768,13 @@ The wire protocol uses length-prefixed binary framing, implemented in
 | Causal check | `causal_check(probe, h, geom, δ, model_fn, thresh)` | `got-probe::intervention` | — |
 | Build exchange request | `build_request(nonce, peer_id, sk, chain, current)` | `got-wire::exchange` | — |
 | Build exchange response | `build_response(nonce, peer_id, sk, verdict, ...)` | `got-wire::exchange` | — |
-| Validate request | `validate_request(req, own_id, nonce, registry)` | `got-wire::exchange` | S-2, §4 Phase 0 |
-| Validate response | `validate_response(rsp, own_id, nonce, registry)` | `got-wire::exchange` | S-2, §4 Phase 0 |
+| Validate request | `validate_request(req, own_id, nonce, registry)` | `got-wire::exchange` | S-2, §4 Phase 0, §7.3/§8.2, §2.1 |
+| Validate response | `validate_response(rsp, own_id, nonce, registry)` | `got-wire::exchange` | S-2, §4 Phase 0, §7.3/§8.2, §2.1 |
 | Domain compatibility check | `check_domain_compatibility(scope_a, scope_b)` | `got-wire::domain` | §4 / Appendix B |
+| Effective governance thresholds | `effective_thresholds(self_entry, peer)` | `got-wire::exchange` | §7.3 / §8.2 |
+| Enforce governance policy | `enforce_governance(peer, attestation, thresholds)` | `got-wire::exchange` | §7.3 / §8.2 |
+| Attestation scope binding | `check_attestation_scope_binding(peer, attestation)` | `got-wire::exchange` | §2.1 |
+| Supervised request (one-way) | `perform_supervised_request(reg_id, sup_key, …)` | `got-wire::exchange` | §5.5 |
 | Full in-memory exchange | `perform_exchange(init_key, ..., resp_key, ..., registry)` | `got-wire::exchange` | S-2, S-8, S-9 |
 | Envelope create | `ExchangeEnvelope::create()` | `got-wire::envelope` | S-9: verified=true |
 | Envelope verify | `envelope.verify()` | `got-wire::envelope` | S-9: sets verified |

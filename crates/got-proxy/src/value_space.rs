@@ -87,7 +87,21 @@ pub struct PairwiseBaseline {
 }
 
 impl PairwiseBaseline {
+    /// Canonicalises the pair order so `term_a <= term_b` lexicographically.
+    ///
+    /// The upstream producer (`compute_pairwise` in session.rs) iterates a
+    /// `HashMap<String, f64>` to decide pair ordering, which is non-deterministic
+    /// across process runs.  Without canonicalisation, two sessions fed identical
+    /// observations could end up storing the same pair as `(honesty, courage)`
+    /// and `(courage, honesty)` respectively, producing different
+    /// `BehavioralValueSpace::hash()` outputs and breaking the determinism
+    /// guarantee that the Tier-0 attestation pathway relies on.
     pub fn new(term_a: String, term_b: String) -> Self {
+        let (term_a, term_b) = if term_a <= term_b {
+            (term_a, term_b)
+        } else {
+            (term_b, term_a)
+        };
         Self {
             term_a,
             term_b,

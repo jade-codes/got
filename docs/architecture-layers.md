@@ -5,10 +5,21 @@ The top layer can be either the CLI (for human-operated setup) or
 an agent runtime (for autonomous agent-to-agent operation).
 Layers 0–4 are identical in both modes.
 
-The pipeline implements three trust tiers (from the plan):
-- **Tier 1 — Signature**: Ed25519 over deterministic canonical bytes
-- **Tier 2 — Consistency**: signature + coverage flags + confidence bounds + chain verification
-- **Tier 3 — Reproduction**: full re-extraction + re-probing + bitwise match
+The pipeline implements three **content-based** trust tiers. The tier
+an attestation belongs to is derived from which fields it populates —
+it is not a schema-version switch:
+- **Tier 1 — Signature**: any valid `got_attest::verify`. Ed25519 over
+  deterministic canonical bytes.
+- **Tier 2 — Consistency + Chain**: `parent_attestation_hash.is_some()`
+  and chain drift within governance-defined bounds. Verified by
+  `got_wire::chain::verify_chain` against the effective `max_drift`
+  from the verifier's `GovernanceThresholds`.
+- **Tier 3 — Causal Proof**: non-empty `causal_scores` with every
+  record's `is_causal == true`. Gated in governance via
+  `require_causal_validation`.
+
+All attestations share a single canonical wire format:
+`got_core::SCHEMA_VERSION == 1`. There are no version branches.
 
 ## Security Hardening Summary
 
@@ -49,7 +60,7 @@ All layers incorporate defence-in-depth measures hardened during the security au
 |  │                          │  │                                  │  |
 |  │                          │  │  On model update:                │  |
 |  │                          │  │    measure drift from reference  │  |
-|  │                          │  │    chain attestation (v2/v3)     │  |
+|  │                          │  │    chain next attestation        │  |
 |  │                          │  │    notify peers                  │  |
 |  └──────────────────────────┘  └──────────────────────────────────┘  |
 |       |       |       |           |       |       |       |          |
@@ -133,8 +144,31 @@ All layers incorporate defence-in-depth measures hardened during the security au
 |  Domain scoping (§4):             |
 |    DomainScope { primary,         |
 |      permitted, exclusions }      |
+|    InteractionMode includes       |
+|      Supervised (§5.5)            |
 |    check_domain_compatibility()   |
 |    → Phase 0, before crypto       |
+|                                   |
+|  Governance (§7.3 / §8.2):        |
+|    GovernanceTable keyed by       |
+|      DomainPattern →              |
+|      GovernanceThresholds         |
+|      { max_drift, min_confidence, |
+|        min_causal_score,          |
+|        require_chain,             |
+|        require_causal_validation }|
+|    effective_thresholds() falls   |
+|    back to flat max_drift_accepted|
+|                                   |
+|  Attestation scope binding (§2.1):|
+|    check_attestation_scope_       |
+|      binding() — rejects when the |
+|    peer's embedded declaration    |
+|    disagrees with the registry    |
+|                                   |
+|  Supervised request (§5.5):       |
+|    perform_supervised_request()   |
+|    → one-directional verdict      |
 +===================================+
         |
         v
@@ -149,13 +183,18 @@ All layers incorporate defence-in-depth measures hardened during the security au
 |  verify(attestation, pubkey) → Result<bool>                           |
 |                                                                       |
 |  serialise_for_signing()  — deterministic canonical LE bytes          |
-|    v1 branch: core fields (readings, model_hash, ...)                 |
-|    v2 branch: + parent_attestation_hash, geometry_hash, drift         |
-|    v3 branch: + causal_scores, intervention_delta, causal_flag        |
+|    LINEAR layout (no version branches):                               |
+|      header/model/precision/input_hash/timestamp                      |
+|      readings / confidence / coverage_flags                           |
+|      parent_attestation_hash / geometry_hash / geometry_drift         |
+|      causal_scores / intervention_delta / causal_flag                 |
+|      sequence_number / directional_drifts / probe_commitment         |
+|      density_reading / curvature_reading                              |
+|      domain_scope_declaration                                         |
 |                                                                       |
 |  attestation_hash() — SHA-256 of canonical bytes (chain linkage)      |
 |  merkle_root()      — RFC 6962 domain-separated SHA-256 Merkle tree   |
-|  is_supported_schema()  {1, 2, 3} → true                             |
+|  is_supported_schema()  v == 1 → true  (single wire format)          |
 |                                                                       |
 +=======================================================================+
         |
@@ -203,7 +242,7 @@ All layers incorporate defence-in-depth measures hardened during the security au
 |                                                                       |
 |  MeasurementSidecar:                                                  |
 |    windowed probe sampling (stratified random from ProbeLibrary)      |
-|    automatic close_window() → signed attestation (v1/v2/v3)          |
+|    automatic close_window() → signed attestation                     |
 |    optional causal_check per reading                                  |
 |    set_parent_hash() for chaining                                     |
 |    coverage tracking across windows                                   |
@@ -228,22 +267,27 @@ All layers incorporate defence-in-depth measures hardened during the security au
 |                                                                       |
 |  — lib.rs —                                                           |
 |                                                                       |
-|  GeometricAttestation (v1 + v2 + v3 schema)                          |
+|  GeometricAttestation (single canonical layout)                       |
 |    S-21: model_hash is Option<[u8; 32]> (no sentinel zeros)          |
-|    schema_version: 1 | 2 | 3                                         |
+|    schema_version = SCHEMA_VERSION (always 1)                         |
 |    parent_attestation_hash, geometry_hash, geometry_drift             |
 |    causal_scores, intervention_delta, causal_flag                     |
 |    sequence_number (Phase 13 monotonic counter)                       |
 |    directional_drifts (Phase 13 per-probe drift)                     |
 |    probe_commitment (Phase 13 pre-computation binding)               |
+|    density_reading, curvature_reading (manifold analysis)             |
+|    domain_scope_declaration (§2.1 embedded scope)                     |
 |    signature: [u8; 64]                                                |
 |                                                                       |
 |  UnsignedAttestation newtype (prevents accidental unsigned use)       |
 |  CausalScoreRecord  UnembeddingMatrix  LayerActivation                |
 |  Precision { Fp32, Fp16, Bfloat16, Int8 }                            |
 |  InnerProduct { Causal, Euclidean, CausalRegularised{ε} }            |
-|  DirectionalDrift  sha256()  hex32/hex64/optional_hex32 (serde)       |
-|  SCHEMA_VERSION / _2 / _3 constants                                   |
+|  DirectionalDrift                                                     |
+|  DomainScopeDeclaration / PermittedDomainDeclaration /                |
+|    InteractionModeTag (wire-level mirrors of got-wire::domain)       |
+|  sha256()  hex32/hex64/optional_hex32 (serde)                         |
+|  SCHEMA_VERSION constant (single value)                               |
 |                                                                       |
 +=======================================================================+
         ^                ^
@@ -270,13 +314,15 @@ All layers incorporate defence-in-depth measures hardened during the security au
 
 Foundation types with no business logic dependencies:
 
-- **`GeometricAttestation`** — the attestation schema (v1 + v2 + v3 fields + Ed25519 signature)
-  - v1 fields: `schema_version`, `model_id`, `input_hash`, `model_hash` (`Option<[u8; 32]>` — S-21), `readings`,
-    `confidences`, `coverage_flags`, `inner_product`, `precision`,
-    `divergence_flag`, `timestamp`, `corpus_version`, `probe_version`, `signature`
-  - v2 extensions: `parent_attestation_hash`, `geometry_hash`, `geometry_drift`
-  - v3 extensions: `causal_scores`, `intervention_delta`, `causal_flag`
-  - Phase 13 extensions: `sequence_number`, `directional_drifts`, `probe_commitment`
+- **`GeometricAttestation`** — the single canonical attestation layout. All capability fields travel in every attestation; whether they are populated determines the content-based trust tier.
+  - Header: `schema_version` (always `SCHEMA_VERSION`), `model_id`, `input_hash`, `model_hash` (`Option<[u8; 32]>` — S-21), `precision`, `inner_product`, `timestamp`, `corpus_version`, `probe_version`
+  - Probe readings: `layer_readings`, `confidence`, `coverage_flags`, `divergence_flag`
+  - Chaining: `parent_attestation_hash`, `geometry_hash`, `geometry_drift`
+  - Causal (Tier 3): `causal_scores`, `intervention_delta`, `causal_flag`
+  - Phase 13 hardening: `sequence_number`, `directional_drifts`, `probe_commitment`
+  - Manifold analysis: `density_reading`, `curvature_reading`
+  - §2.1 binding: `domain_scope_declaration`
+  - `signature: [u8; 64]` (Ed25519 over all preceding fields)
 - **`UnsignedAttestation`** — newtype wrapper preventing accidental unsigned use
 - **`CausalScoreRecord`** — serialisable causal score (delta_plus, delta_minus, consistency, is_causal)
 - **`DirectionalDrift`** — per-probe directional drift record (Phase 13)
@@ -304,7 +350,8 @@ Foundation types with no business logic dependencies:
 - **`sha256(data)`** — canonical SHA-256 utility (used by all crates)
 - **`hex32`/`hex64`/`optional_hex32`** — serde helpers for fixed-size byte arrays as hex strings
   - Validates all bytes are ASCII hex before indexing (prevents panic on multi-byte UTF-8)
-- **`SCHEMA_VERSION`/`SCHEMA_VERSION_2`/`SCHEMA_VERSION_3`** — supported schema version constants
+- **`SCHEMA_VERSION`** — single wire-format version. All attestation capabilities (chaining, causal scores, manifold readings, embedded domain scope) are expressed through Option fields inside one canonical layout. Trust tiers are *content*-based, not version-gated — Tier 2 = `parent_attestation_hash.is_some()`, Tier 3 = non-empty `causal_scores` with every record causal.
+- **`DomainScopeDeclaration` / `PermittedDomainDeclaration` / `InteractionModeTag`** — wire-level mirror of `got-wire::domain` types, carried inside the signed payload (§2.1). String-based for stability.
 
 ### Layer 1 — Probe Training, Inference & Causal Intervention (`got-probe`)
 
@@ -329,11 +376,11 @@ Machine learning and causal analysis layer. Depends on Layer 0 geometry:
 
 Cryptographic layer. Depends on Layer 0 types only:
 
-- **`assemble_and_sign(attestation, key)`** — canonical serialise → Ed25519 sign (v1, v2, v3)
+- **`assemble_and_sign(attestation, key)`** — canonical serialise → Ed25519 sign
   - S-7: rejects timestamps > now + 300 s
   - S-13: rejects string fields > 256 bytes
   - S-20: rejects > 1 024 layers or > 65 536 readings
-- **`verify(attestation, pubkey)`** — canonical serialise → Ed25519 verify (v1, v2, v3)
+- **`verify(attestation, pubkey)`** — canonical serialise → Ed25519 verify
 - **`serialise_for_signing()`** — deterministic canonical byte serialisation
 - **`attestation_hash()`** — SHA-256 of canonical bytes (used as parent hash in chains)
 - **`merkle_root(shards)`** — SHA-256 Merkle tree with RFC 6962 domain separation
@@ -349,8 +396,11 @@ Network exchange layer. Depends on got-core and got-attest:
 - **`ExchangeEnvelope`** — signed 200-byte envelope (S-9: `verified` flag, `from_bytes_verified()`, `is_verified()`)
 - **`verify_chain`** — walk chain, check parent linkage, enforce drift (S-8: `&[VerifyingKey]` for key rotation)
 - **`TrustRegistry`** — TOML config (S-2: SHA-256 integrity on load; `max_attestation_age_secs`)
-- **`AgentEntry`** — name, public_key, agent_id, max_drift_accepted, roles, expected_model_hash, certificate, domain_scope
-- **`DomainScope`** (`got-wire::domain`) — primary `Domain`, `Vec<PermittedDomain>` (with `InteractionMode`), exclusion patterns. `check_domain_compatibility()` runs at Phase 0 in `validate_request` / `validate_response`, before any cryptographic or geometric verification (Protocol §4 / Appendix B)
+- **`AgentEntry`** — name, public_key, agent_id, max_drift_accepted, roles, expected_model_hash, certificate, domain_scope, governance_table
+- **`DomainScope`** (`got-wire::domain`) — primary `Domain`, `Vec<PermittedDomain>` (with `InteractionMode` including `Supervised`), exclusion patterns. `check_domain_compatibility()` runs at Phase 0 in `validate_request` / `validate_response`, before any cryptographic or geometric verification (Protocol §4 / Appendix B). `to_declaration()` / `from_declaration()` mirror the rich type into the wire-level struct that rides inside the signed attestation payload.
+- **`GovernanceThresholds`** (`got-wire::governance`) — per-domain `max_drift`, `min_confidence`, `min_causal_score`, `require_chain`, `require_causal_validation`. `GovernanceTable` keyed by `DomainPattern` with most-specific lookup. `effective_thresholds()` falls back to `permissive(entry.max_drift_accepted)` when no domain-specific policy matches (§7.3 / §8.2).
+- **`perform_supervised_request()`** — one-directional exchange helper (§5.5): a regulator demands an attestation from a supervised agent without producing one of its own. Requires `InteractionMode::Supervised` on both sides of the domain scope.
+- **`check_attestation_scope_binding()`** — §2.1 cross-check: if the incoming attestation carries a `DomainScopeDeclaration`, it must match the registry's entry for the same agent. Catches relay attacks and misconfigured agents.
 
 ### Layer 3b — Attestation Store (`got-store`)
 

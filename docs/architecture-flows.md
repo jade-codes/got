@@ -90,15 +90,16 @@ All flows reflect the security-hardened codebase (353 tests passing).
                               probes.json (persisted)
                                          |
   =====================================================
-   SELF-ATTESTATION (v1, v2, or v3)      |
+   SELF-ATTESTATION                      |
   =====================================================
                                          |
   Why: The attestation is a signed, deterministic record of what
   the probes measured. It is independently reproducible (Tier 3).
-  Schema versions add progressive guarantees:
-    v1 = frozen model (Tier 1: signature)
-    v2 = chained after model update (Tier 2: consistency + drift)
-    v3 = causal intervention proof (the plan's KEYSTONE)
+  Trust tiers are *content-based* — they are derived from which
+  fields the attestation populates, not from a schema version:
+    Tier 1 = any signed attestation
+    Tier 2 = `parent_attestation_hash.is_some()` (chained)
+    Tier 3 = non-empty `causal_scores` with every record causal
 
   Hardening (defence-in-depth):
     S-7:  timestamp must be ≤ now + 300 s
@@ -115,12 +116,12 @@ All flows reflect the security-hardened codebase (353 tests passing).
         probes.json ----------+----------+
                               |
                               v
-   If model has updated (v2 chained):
+   If the model has updated (chained attestation):
      load reference .gotgeo ----> Geometry_ref
      drift = drift_from(current, ref)
      if drift > max_drift: STOP (probes stale)
      read_probe_checked(probe, set, h, current, ref)
-   Else (v1 frozen):
+   Else (fresh / anchor):
      read_probe(probe, h, geometry)
                               |
                               v
@@ -130,7 +131,7 @@ All flows reflect the security-hardened codebase (353 tests passing).
                 flag = conf < threshold
                               |
                               v
-   Optional causal checks (v3):
+   Optional causal checks (Tier 3):
      For each probe:
        causal_check(probe, h, geometry, delta, model_fn, threshold)
          h+ = h + delta*w_c,   h- = h - delta*w_c
@@ -143,17 +144,19 @@ All flows reflect the security-hardened codebase (353 tests passing).
         (weight shards)    |  |  |       (input hash)
                            v  v  v
               Fill GeometricAttestation struct
-              { schema_version: 1, 2, or 3,
+              { schema_version: SCHEMA_VERSION,   (always 1)
                 model_hash: Option<[u8; 32]>,    ← S-21
                 parent_attestation_hash: None or H(prev),
                 geometry_hash: H(Phi),
                 geometry_drift: None or Some(drift),
-                causal_scores: [...],
+                causal_scores: [...],            (Tier 3 only)
                 intervention_delta: Some(delta),
                 causal_flag: Some(all_pass),
                 sequence_number,                  ← Phase 13
                 directional_drifts: [...],        ← Phase 13
                 probe_commitment: Some(H(...)),   ← Phase 13
+                density_reading / curvature_reading (manifold),
+                domain_scope_declaration (§2.1 binding),
                 readings, confidences, flags, ... }
                               |
                               v
@@ -294,8 +297,20 @@ All flows reflect the security-hardened codebase (353 tests passing).
          peer_scope,                      peer_scope,
          self_scope)                      self_scope)
      §4 / Appendix B                  §4 / Appendix B
+     Supervised pair OK (§5.5)        Supervised pair OK (§5.5)
      STRUCTURAL — runs                STRUCTURAL — runs
      before envelope                  before envelope
+                |                                |
+   §7.3/§8.2 Governance:            §7.3/§8.2 Governance:
+     effective_thresholds +           effective_thresholds +
+     enforce_governance               enforce_governance
+     (max_drift, confidence,          (max_drift, confidence,
+      require_chain,                   require_chain,
+      require_causal_validation)      require_causal_validation)
+                |                                |
+   §2.1 Scope binding:              §2.1 Scope binding:
+     check_attestation_               check_attestation_
+       scope_binding                    scope_binding
                 |                                |
    Envelope verify:                 Envelope verify:
      Ed25519 sig check                Ed25519 sig check
@@ -305,7 +320,7 @@ All flows reflect the security-hardened codebase (353 tests passing).
      timestamp freshness              timestamp freshness
      (S-9: verified flag set)         (S-9: verified flag set)
                 |                                |
-   Chain verify (if v2/v3):          Chain verify:
+   Chain verify (if chained):       Chain verify:
      verify_chain(chain,               verify_chain(chain,
        current, pks, max_drift)          current, pks, max_drift)
        ↑ S-8: &[VerifyingKey]           ↑ S-8: &[VerifyingKey]
@@ -330,14 +345,14 @@ All flows reflect the security-hardened codebase (353 tests passing).
            TrustRegistry loaded with S-2 SHA-256 integrity
                               |
                               v
-              For each link in chain (if v2/v3):
+              For each link in chain (if chained):
                 check parent_attestation_hash linkage
                 check geometry_drift <= accepted_max
                 check model_id consistency across chain
                 check signature against &[VerifyingKey] (S-8)
                               |
                               v
-              Check schema_version in {1, 2, 3}
+              Check schema_version == SCHEMA_VERSION
                               |
                               v
               serialise_for_signing(attestation)
@@ -380,10 +395,15 @@ maximum drift threshold (`max_drift`).
 
 ### 4. Self-Attestation (Probes + Activations → Signed Attestation)
 
-Three schema versions provide progressively stronger guarantees:
-- **v1** (frozen model, Tier 1): basic probe readings + Ed25519 signature
-- **v2** (after model update, Tier 2): chained to previous attestation, geometry drift
-- **v3** (with causal intervention, the KEYSTONE): proves probed directions are causally linked
+All attestations share a single canonical wire format
+(`SCHEMA_VERSION == 1`). Trust tiers are *content-based* — the verifier
+derives the tier by inspecting which fields are populated:
+- **Tier 1 — Signature**: any attestation with a valid Ed25519 signature.
+- **Tier 2 — Consistency + Chain**: `parent_attestation_hash.is_some()`
+  and chain drift within governance bounds.
+- **Tier 3 — Causal Proof**: non-empty `causal_scores` with every
+  record having `is_causal == true`. The KEYSTONE — proves the probed
+  directions are causally linked, not surface correlations.
 
 Defence-in-depth gates in `assemble_and_sign()`:
 - S-7: timestamp ≤ now + 300 s

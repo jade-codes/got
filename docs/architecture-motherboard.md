@@ -177,6 +177,7 @@ Step 3: ATTEST CHIP                          lookup(agent_id) → AgentEntry
   S-7: timestamp ≤ 300s future               §4 Phase 0:
   S-13: strings ≤ 256 bytes                    check_domain_compatibility(
   S-20: layers ≤ 1024                            peer_scope, self_scope)
+                                                 Supervised pair OK (§5.5)
                                                  → DomainExcluded /
                                                    DomainNotPermitted /
                                                    DomainModeIncompatible
@@ -184,8 +185,24 @@ Step 3: ATTEST CHIP                          lookup(agent_id) → AgentEntry
                                                   has no scope declared)
                                                     │
                                                     ▼
+                                            §7.3 / §8.2 Governance:
+                                              effective_thresholds(
+                                                self_entry, peer)
+                                              enforce_governance(
+                                                max_drift, min_confidence,
+                                                require_chain,
+                                                require_causal_validation)
+                                                    │
+                                                    ▼
+                                            §2.1 Attestation scope binding:
+                                              check_attestation_scope_binding(
+                                                peer, attestation)
+                                              embedded declaration must
+                                              match registry domain_scope
+                                                    │
+                                                    ▼
                                             Step 9: ENVELOPE CHIP (peer)
-  v1/v2/v3 schema selection                  verify(envelope, pk_sender)
+  schema_version = SCHEMA_VERSION            verify(envelope, pk_sender)
   UnsignedAttestation → sign                 S-9: from_bytes_verified()
   → GeometricAttestation (signed)            check: nonce, peer_id,
          │                                     attest_hash, chain_root,

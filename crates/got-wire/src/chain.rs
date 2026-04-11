@@ -151,7 +151,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
     use got_attest::assemble_and_sign;
-    use got_core::{InnerProduct, Precision, SCHEMA_VERSION, SCHEMA_VERSION_2};
+    use got_core::{InnerProduct, Precision, SCHEMA_VERSION};
 
     fn test_key() -> SigningKey {
         SigningKey::from_bytes(&[0x42; 32])
@@ -183,6 +183,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
         assemble_and_sign(a, key).unwrap()
@@ -195,7 +196,7 @@ mod tests {
     ) -> GeometricAttestation {
         let parent_hash = attestation_hash(parent).unwrap();
         let a = GeometricAttestation {
-            schema_version: SCHEMA_VERSION_2,
+            schema_version: SCHEMA_VERSION,
             model_id: "test-model".to_string(),
             model_hash: Some([0xAA; 32]),
             precision: Precision::Fp32,
@@ -219,6 +220,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
         assemble_and_sign(a, key).unwrap()
@@ -259,7 +261,7 @@ mod tests {
         let key = test_key();
         // Build an attestation with a parent hash set (invalid anchor).
         let mut bad_anchor = GeometricAttestation {
-            schema_version: SCHEMA_VERSION_2,
+            schema_version: SCHEMA_VERSION,
             model_id: "test-model".to_string(),
             model_hash: Some([0xAA; 32]),
             precision: Precision::Fp32,
@@ -283,6 +285,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
         bad_anchor = assemble_and_sign(bad_anchor, &key).unwrap();
@@ -298,7 +301,7 @@ mod tests {
         let anchor = make_v1_attestation(&key);
         // Build a child that points to a different parent hash.
         let mut bad_child = GeometricAttestation {
-            schema_version: SCHEMA_VERSION_2,
+            schema_version: SCHEMA_VERSION,
             model_id: "test-model".to_string(),
             model_hash: Some([0xAA; 32]),
             precision: Precision::Fp32,
@@ -322,6 +325,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
         bad_child = assemble_and_sign(bad_child, &key).unwrap();
@@ -380,7 +384,7 @@ mod tests {
 
         // Create a child with a DIFFERENT model_id.
         let mut bad = GeometricAttestation {
-            schema_version: SCHEMA_VERSION_2,
+            schema_version: SCHEMA_VERSION,
             model_id: "other-model".to_string(), // mismatch!
             model_hash: Some([0xAA; 32]),
             precision: Precision::Fp32,
@@ -404,6 +408,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
         bad = assemble_and_sign(bad, &key).unwrap();
@@ -461,6 +466,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
         let child = assemble_and_sign(child, &key_b).unwrap();

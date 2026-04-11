@@ -13,9 +13,10 @@ use ed25519_dalek::SigningKey;
 use got_core::GeometricAttestation;
 
 use crate::chain::{attestation_hash, verify_chain};
-use crate::domain::check_domain_compatibility;
+use crate::domain::{check_domain_compatibility, DomainScope};
 use crate::envelope::ExchangeEnvelope;
-use crate::registry::{compute_agent_id, TrustRegistry};
+use crate::governance::GovernanceThresholds;
+use crate::registry::{compute_agent_id, AgentEntry, TrustRegistry};
 use crate::WireError;
 
 // ---------------------------------------------------------------------------
@@ -59,7 +60,8 @@ pub struct ExchangeRequest {
     pub agent_id: [u8; 32],
     /// Signed envelope binding this attestation to this exchange.
     pub envelope: ExchangeEnvelope,
-    /// Attestation chain (oldest first), may be empty for v1.
+    /// Attestation chain (oldest first), may be empty for Tier-1
+    /// (bare) attestations.
     pub chain: Vec<GeometricAttestation>,
     /// The current attestation being exchanged.
     pub current: GeometricAttestation,
@@ -166,6 +168,168 @@ pub fn build_response(
 // Validation helpers
 // ---------------------------------------------------------------------------
 
+/// Resolve the effective governance thresholds a verifier applies to an
+/// incoming attestation from `peer` (§7.3 / §8.2).
+///
+/// Priority (most to least specific):
+///   1. `self_entry.governance_table` matched against the peer's primary
+///      domain (requires peer to declare a scope).
+///   2. Flat `self_entry.max_drift_accepted`, wrapped in
+///      `GovernanceThresholds::permissive`, which preserves pre-§8.2
+///      PoC behaviour exactly.
+fn effective_thresholds(self_entry: &AgentEntry, peer: &AgentEntry) -> GovernanceThresholds {
+    if let Some(peer_scope) = peer.domain_scope.as_ref() {
+        if let Some(t) = self_entry.governance_table.lookup(&peer_scope.primary) {
+            return *t;
+        }
+    }
+    GovernanceThresholds::permissive(self_entry.max_drift_accepted)
+}
+
+/// §2.1: if the attestation carries an embedded domain scope declaration,
+/// the declared primary / permitted / exclusions MUST match the trust
+/// registry's entry for the same agent.  This catches relay attacks that
+/// substitute attestations across agents, and catches a misconfigured
+/// agent that claims one domain in the signed payload and another in the
+/// registry.
+fn check_attestation_scope_binding(
+    peer: &AgentEntry,
+    attestation: &got_core::GeometricAttestation,
+) -> Result<(), String> {
+    let decl = match attestation.domain_scope_declaration.as_ref() {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+
+    // Parse the embedded declaration back into a structured DomainScope.
+    let embedded = match DomainScope::from_declaration(decl) {
+        Ok(s) => s,
+        Err(e) => return Err(format!("embedded domain scope malformed: {e}")),
+    };
+
+    match peer.domain_scope.as_ref() {
+        Some(registry_scope) => {
+            if !domain_scopes_equivalent(&embedded, registry_scope) {
+                return Err(format!(
+                    "attestation domain_scope_declaration ({}) disagrees with registry ({})",
+                    embedded.primary.as_str(),
+                    registry_scope.primary.as_str()
+                ));
+            }
+        }
+        None => {
+            return Err(format!(
+                "attestation declares domain {} but registry entry is unscoped",
+                embedded.primary.as_str()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Semantic equivalence check for two `DomainScope`s using their canonical
+/// (string) form.  We ignore ordering of the permitted / exclusion lists
+/// since both sides are governance-curated and order is not meaningful.
+fn domain_scopes_equivalent(a: &DomainScope, b: &DomainScope) -> bool {
+    if a.primary.as_str() != b.primary.as_str() {
+        return false;
+    }
+    let mut a_perm: Vec<_> = a
+        .permitted
+        .iter()
+        .map(|p| (p.pattern.canonical(), p.mode))
+        .collect();
+    let mut b_perm: Vec<_> = b
+        .permitted
+        .iter()
+        .map(|p| (p.pattern.canonical(), p.mode))
+        .collect();
+    a_perm.sort();
+    b_perm.sort();
+    if a_perm != b_perm {
+        return false;
+    }
+    let mut a_excl: Vec<_> = a.exclusions.iter().map(|p| p.canonical()).collect();
+    let mut b_excl: Vec<_> = b.exclusions.iter().map(|p| p.canonical()).collect();
+    a_excl.sort();
+    b_excl.sort();
+    a_excl == b_excl
+}
+
+/// Apply §8.2 per-domain policy checks to an incoming attestation.
+/// Returns `Ok(reason)` on rejection; `Err` only for internal errors.
+fn enforce_governance(
+    peer: &AgentEntry,
+    attestation: &got_core::GeometricAttestation,
+    thresholds: &GovernanceThresholds,
+) -> Option<String> {
+    let domain_label = peer
+        .domain_scope
+        .as_ref()
+        .map(|s| s.primary.as_str().to_string())
+        .unwrap_or_else(|| "(unscoped)".to_string());
+
+    // Tier 2+: chained attestation required.
+    if thresholds.require_chain && attestation.parent_attestation_hash.is_none() {
+        return Some(format!(
+            "chain required for domain {domain_label} but attestation has no parent_attestation_hash"
+        ));
+    }
+
+    // Tier 3: causal validation required — non-empty causal_scores and
+    // every record must be causal.
+    if thresholds.require_causal_validation {
+        if attestation.causal_scores.is_empty() {
+            return Some(format!(
+                "causal validation required for domain {domain_label} but attestation has no causal_scores"
+            ));
+        }
+        if !attestation.causal_scores.iter().all(|s| s.is_causal) {
+            return Some(format!(
+                "causal validation required for domain {domain_label} but at least one probe failed causal_check"
+            ));
+        }
+    }
+
+    // Minimum probe confidence — any dimension below the bar fails.
+    if thresholds.min_confidence > 0.0 {
+        if let Some(&lowest) = attestation
+            .confidence
+            .iter()
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            if lowest < thresholds.min_confidence {
+                return Some(format!(
+                    "confidence {lowest} below minimum {} required for domain {domain_label}",
+                    thresholds.min_confidence
+                ));
+            }
+        }
+    }
+
+    // Minimum causal consistency — only meaningful for Tier-3 attestations
+    // that carry causal_scores.  We take the *minimum* consistency so a
+    // single failing probe fails the whole attestation.
+    if let Some(min_causal) = thresholds.min_causal_score {
+        if !attestation.causal_scores.is_empty() {
+            let lowest = attestation
+                .causal_scores
+                .iter()
+                .map(|s| s.consistency)
+                .fold(f32::INFINITY, f32::min);
+            if lowest < min_causal {
+                return Some(format!(
+                    "causal consistency {lowest} below minimum {min_causal} required for domain {domain_label}"
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+
 /// Validate an incoming `ExchangeRequest` against the local trust registry.
 ///
 /// Returns `Ok(Verdict::Accepted)` or `Ok(Verdict::Rejected)` with a reason.
@@ -266,7 +430,28 @@ pub fn validate_request(
         }
     }
 
-    // 4. If there is a chain, verify it.
+    // 3d. §7.3 / §8.2 governance policy.  If the verifier has a
+    //     governance_table entry matching the peer's primary domain,
+    //     the resolved GovernanceThresholds override the flat drift
+    //     bound and additionally enforce min_confidence,
+    //     min_causal_score, require_chain, and require_causal_validation.
+    //     Unscoped peers fall through to the flat defaults.
+    let thresholds = if let Some(self_entry) = registry.lookup(own_agent_id) {
+        effective_thresholds(self_entry, entry)
+    } else {
+        GovernanceThresholds::permissive(entry.max_drift_accepted)
+    };
+    if let Some(reason) = enforce_governance(entry, &req.current, &thresholds) {
+        return Ok((Verdict::Rejected, reason));
+    }
+
+    // 3e. §2.1 — if the attestation embeds a domain scope declaration,
+    //     it must agree with the registry.
+    if let Err(reason) = check_attestation_scope_binding(entry, &req.current) {
+        return Ok((Verdict::Rejected, reason));
+    }
+
+    // 4. If there is a chain, verify it under the effective drift bound.
     if !req.chain.is_empty() {
         if req.chain.len() > registry.max_chain_length {
             return Ok((
@@ -282,7 +467,7 @@ pub fn validate_request(
             &req.chain,
             &req.current,
             &[entry.public_key],
-            entry.max_drift_accepted,
+            thresholds.max_drift,
         ) {
             Ok(_) => {}
             Err(e) => {
@@ -407,6 +592,21 @@ pub fn validate_response(
         }
     }
 
+    // 3d. §7.3 / §8.2 governance policy — mirrors validate_request.
+    let thresholds = if let Some(self_entry) = registry.lookup(own_agent_id) {
+        effective_thresholds(self_entry, entry)
+    } else {
+        GovernanceThresholds::permissive(entry.max_drift_accepted)
+    };
+    if let Some(reason) = enforce_governance(entry, &rsp.current, &thresholds) {
+        return Ok((Verdict::Rejected, reason));
+    }
+
+    // 3e. §2.1 — attestation-registry domain scope binding.
+    if let Err(reason) = check_attestation_scope_binding(entry, &rsp.current) {
+        return Ok((Verdict::Rejected, reason));
+    }
+
     // 4. Chain verification.
     if !rsp.chain.is_empty() {
         if rsp.chain.len() > registry.max_chain_length {
@@ -423,7 +623,7 @@ pub fn validate_response(
             &rsp.chain,
             &rsp.current,
             &[entry.public_key],
-            entry.max_drift_accepted,
+            thresholds.max_drift,
         ) {
             Ok(_) => {}
             Err(e) => {
@@ -515,6 +715,55 @@ pub fn perform_exchange(
     Ok((result, responder_verdict))
 }
 
+/// Perform a one-directional supervised verification (§5.5).
+///
+/// Models the asymmetric regulatory pattern: a regulator (Agent M) demands
+/// an attestation from a supervised agent (Agent L) without producing one
+/// of its own.  The regulator's authority derives from institutional
+/// mandate, not from mutual geometric compatibility, so this function
+/// deliberately has no "responder attestation" input.
+///
+/// Flow:
+///   1. Supervised agent builds a normal ExchangeRequest carrying its
+///      current attestation, chain, and a freshly-generated nonce.
+///   2. The regulator runs `validate_request` against its local trust
+///      registry — this applies Phase 0 domain compat, envelope, chain,
+///      and governance checks exactly as in a symmetric exchange.
+///   3. The regulator emits a verdict; no counter-attestation is sent.
+///
+/// For the domain compatibility check to succeed, both agents must
+/// declare the other's primary domain in `Supervised` mode (or at least
+/// one side must have no domain_scope at all, which defaults to
+/// "unscoped" — permissive).
+pub fn perform_supervised_request(
+    // Regulator (Agent M) — holds oversight authority, never attests.
+    regulator_id: &[u8; 32],
+    // Supervised agent (Agent L) — produces the attestation to be verified.
+    supervised_key: &SigningKey,
+    supervised_chain: Vec<GeometricAttestation>,
+    supervised_current: GeometricAttestation,
+    // Shared trust registry.
+    registry: &TrustRegistry,
+) -> Result<(Verdict, String), WireError> {
+    // 1. Supervised agent builds its request aimed at the regulator.
+    let nonce = {
+        let mut n = [0u8; 32];
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut n);
+        n
+    };
+    let request = build_request(
+        nonce,
+        *regulator_id,
+        supervised_key,
+        supervised_chain,
+        supervised_current,
+    )?;
+
+    // 2. Regulator validates the request against its local policy.
+    validate_request(&request, regulator_id, Some(&nonce), registry)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -524,7 +773,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::Signer;
     use got_attest::assemble_and_sign;
-    use got_core::{InnerProduct, Precision, SCHEMA_VERSION, SCHEMA_VERSION_2};
+    use got_core::{InnerProduct, Precision, SCHEMA_VERSION};
 
     use crate::chain::attestation_hash as chain_attest_hash;
     use crate::registry::AgentEntry;
@@ -567,6 +816,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
         assemble_and_sign(a, key).unwrap()
@@ -579,7 +829,7 @@ mod tests {
     ) -> GeometricAttestation {
         let parent_hash = chain_attest_hash(parent).unwrap();
         let a = GeometricAttestation {
-            schema_version: SCHEMA_VERSION_2,
+            schema_version: SCHEMA_VERSION,
             model_id: "test-model".to_string(),
             model_hash: Some([0x11; 32]),
             precision: Precision::Fp32,
@@ -603,6 +853,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
         assemble_and_sign(a, key).unwrap()
@@ -622,6 +873,7 @@ mod tests {
             expected_model_hash: None,
             certificate: None,
             domain_scope: None,
+            governance_table: crate::governance::GovernanceTable::default(),
         });
         registry.add_agent(AgentEntry {
             name: "bob".to_string(),
@@ -632,6 +884,7 @@ mod tests {
             expected_model_hash: None,
             certificate: None,
             domain_scope: None,
+            governance_table: crate::governance::GovernanceTable::default(),
         });
 
         registry
@@ -880,6 +1133,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
         // Sign directly to bypass assemble_and_sign's S-7 timestamp guard.
@@ -924,6 +1178,7 @@ mod tests {
             expected_model_hash: None,
             certificate: None,
             domain_scope: alice_scope,
+            governance_table: crate::governance::GovernanceTable::default(),
         });
         registry.add_agent(AgentEntry {
             name: "bob".to_string(),
@@ -934,6 +1189,7 @@ mod tests {
             expected_model_hash: None,
             certificate: None,
             domain_scope: bob_scope,
+            governance_table: crate::governance::GovernanceTable::default(),
         });
         registry
     }
@@ -1025,6 +1281,371 @@ mod tests {
 
         assert_eq!(responder_verdict, Verdict::Accepted, "{}", result.reason);
         assert_eq!(result.our_verdict, Verdict::Accepted);
+    }
+
+    // -----------------------------------------------------------------------
+    // §5.5 Supervised mode + §7.3/§8.2 per-domain governance
+    // -----------------------------------------------------------------------
+
+    fn regulator_scope() -> crate::domain::DomainScope {
+        use crate::domain::*;
+        DomainScope {
+            primary: Domain::parse("finance.regulatory-compliance").unwrap(),
+            permitted: vec![PermittedDomain {
+                pattern: DomainPattern::parse("finance.*").unwrap(),
+                mode: InteractionMode::Supervised,
+            }],
+            exclusions: vec![],
+        }
+    }
+
+    fn trading_scope() -> crate::domain::DomainScope {
+        use crate::domain::*;
+        DomainScope {
+            primary: Domain::parse("finance.trading").unwrap(),
+            permitted: vec![PermittedDomain {
+                pattern: DomainPattern::parse("finance.regulatory-compliance").unwrap(),
+                mode: InteractionMode::Supervised,
+            }],
+            exclusions: vec![],
+        }
+    }
+
+    /// §5.5: regulator (Agent M) demands attestation from supervised
+    /// trading agent (Agent L) without producing one itself.
+    #[test]
+    fn supervised_request_accepted() {
+        let regulator = SigningKey::from_bytes(&[0xCC; 32]); // Agent M
+        let trader = SigningKey::from_bytes(&[0xDD; 32]);    // Agent L
+        let registry = build_registry_with_domains(
+            &regulator,
+            &trader,
+            Some(regulator_scope()),
+            Some(trading_scope()),
+        );
+
+        // The helper aliases `alice` → regulator, `bob` → trader in the
+        // registry, but the labels don't matter for the semantic check.
+        let trader_attest = make_v1(&trader);
+        let regulator_id = compute_agent_id(&regulator.verifying_key());
+
+        let (verdict, reason) = perform_supervised_request(
+            &regulator_id,
+            &trader,
+            vec![],
+            trader_attest,
+            &registry,
+        )
+        .unwrap();
+
+        assert_eq!(verdict, Verdict::Accepted, "reason: {reason}");
+    }
+
+    /// Without Supervised permission on either side, the one-directional
+    /// request must still be rejected at Phase 0.
+    #[test]
+    fn supervised_request_rejected_without_supervised_mode() {
+        let regulator = SigningKey::from_bytes(&[0xCC; 32]);
+        let trader = SigningKey::from_bytes(&[0xDD; 32]);
+        // Regulator advertises Cooperative instead of Supervised.
+        let mut bad_reg_scope = regulator_scope();
+        bad_reg_scope.permitted[0].mode = crate::domain::InteractionMode::ReadOnly;
+        let mut bad_trd_scope = trading_scope();
+        bad_trd_scope.permitted[0].mode = crate::domain::InteractionMode::ReadOnly;
+        let registry = build_registry_with_domains(
+            &regulator,
+            &trader,
+            Some(bad_reg_scope),
+            Some(bad_trd_scope),
+        );
+
+        let trader_attest = make_v1(&trader);
+        let regulator_id = compute_agent_id(&regulator.verifying_key());
+
+        let (verdict, reason) = perform_supervised_request(
+            &regulator_id,
+            &trader,
+            vec![],
+            trader_attest,
+            &registry,
+        )
+        .unwrap();
+
+        assert_eq!(verdict, Verdict::Rejected);
+        assert!(
+            reason.contains("domain"),
+            "expected domain rejection, got: {reason}"
+        );
+    }
+
+    /// §8.2: per-domain `require_causal_validation` rejects a bare Tier-1
+    /// attestation when the verifier's governance table mandates Tier 3
+    /// causal proof for that domain.
+    #[test]
+    fn governance_rejects_when_causal_validation_required() {
+        use crate::domain::{Domain, DomainPattern, DomainScope, InteractionMode, PermittedDomain};
+        use crate::governance::{GovernanceEntry, GovernanceTable, GovernanceThresholds};
+
+        let alice = key_alice(); // verifier (healthcare regulator-ish)
+        let bob = key_bob(); // producer submitting a non-causal attestation
+
+        let alice_scope = DomainScope {
+            primary: Domain::parse("healthcare.regulator").unwrap(),
+            permitted: vec![PermittedDomain {
+                pattern: DomainPattern::parse("healthcare.*").unwrap(),
+                mode: InteractionMode::Cooperative,
+            }],
+            exclusions: vec![],
+        };
+        let bob_scope = DomainScope {
+            primary: Domain::parse("healthcare.diagnostic-advisory").unwrap(),
+            permitted: vec![PermittedDomain {
+                pattern: DomainPattern::parse("healthcare.*").unwrap(),
+                mode: InteractionMode::Cooperative,
+            }],
+            exclusions: vec![],
+        };
+
+        let mut registry =
+            build_registry_with_domains(&alice, &bob, Some(alice_scope), Some(bob_scope));
+
+        // Inject a governance rule on alice: healthcare.* requires
+        // Tier-3 causal validation.
+        let alice_id = compute_agent_id(&alice.verifying_key());
+        let alice_entry = registry.agents.get_mut(&alice_id).unwrap();
+        alice_entry.governance_table = GovernanceTable {
+            entries: vec![GovernanceEntry {
+                pattern: DomainPattern::parse("healthcare.*").unwrap(),
+                thresholds: GovernanceThresholds {
+                    max_drift: 0.03,
+                    min_confidence: 0.0,
+                    min_causal_score: None,
+                    require_chain: false,
+                    require_causal_validation: true,
+                },
+            }],
+        };
+
+        // Bob submits a plain attestation with no causal_scores.
+        let bob_attest = make_v1(&bob);
+        let req = build_request([0x42; 32], alice_id, &bob, vec![], bob_attest).unwrap();
+
+        let (verdict, reason) = validate_request(&req, &alice_id, None, &registry).unwrap();
+        assert_eq!(verdict, Verdict::Rejected);
+        assert!(
+            reason.contains("causal"),
+            "expected causal-validation rejection, got: {reason}"
+        );
+    }
+
+    /// §7.3: per-domain max_drift overrides the flat AgentEntry value.
+    /// A chain that would pass the flat 0.10 bound is rejected when the
+    /// verifier's table demands 0.02 for the peer's domain.
+    #[test]
+    fn governance_per_domain_drift_overrides_flat_default() {
+        use crate::domain::{Domain, DomainPattern, DomainScope, InteractionMode, PermittedDomain};
+        use crate::governance::{GovernanceEntry, GovernanceTable, GovernanceThresholds};
+
+        let alice = key_alice();
+        let bob = key_bob();
+
+        let scope = |p: &str| DomainScope {
+            primary: Domain::parse(p).unwrap(),
+            permitted: vec![PermittedDomain {
+                pattern: DomainPattern::parse("infrastructure.*").unwrap(),
+                mode: InteractionMode::Cooperative,
+            }],
+            exclusions: vec![],
+        };
+
+        let mut registry = build_registry_with_domains(
+            &alice,
+            &bob,
+            Some(scope("infrastructure.energy-grid")),
+            Some(scope("infrastructure.water-systems")),
+        );
+
+        // Flat per-agent bound is generous (0.05, set by build_registry).
+        // Override with a critical-infra rule: 0.02.
+        let alice_id = compute_agent_id(&alice.verifying_key());
+        registry.agents.get_mut(&alice_id).unwrap().governance_table = GovernanceTable {
+            entries: vec![GovernanceEntry {
+                pattern: DomainPattern::parse("infrastructure.*").unwrap(),
+                thresholds: GovernanceThresholds {
+                    max_drift: 0.02,
+                    min_confidence: 0.0,
+                    min_causal_score: None,
+                    require_chain: false,
+                    require_causal_validation: false,
+                },
+            }],
+        };
+
+        // Bob submits a chained attestation with drift 0.04 — inside the old 0.05 flat
+        // bound but above the new 0.02 infra bound.
+        let bob_anchor = make_v1(&bob);
+        let bob_current = make_v2_child(&bob, &bob_anchor, 0.04);
+        let bob_id = compute_agent_id(&bob.verifying_key());
+        let _ = bob_id;
+        let req = build_request(
+            [0x42; 32],
+            alice_id,
+            &bob,
+            vec![bob_anchor],
+            bob_current,
+        )
+        .unwrap();
+
+        let (verdict, reason) = validate_request(&req, &alice_id, None, &registry).unwrap();
+        assert_eq!(verdict, Verdict::Rejected);
+        assert!(
+            reason.contains("drift"),
+            "expected drift rejection, got: {reason}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // §2.1 — embedded domain scope declaration
+    // -----------------------------------------------------------------------
+
+    /// Build an attestation whose embedded domain_scope_declaration
+    /// matches the scope we register for the same signer.
+    fn make_scoped_attestation(
+        key: &SigningKey,
+        scope: &crate::domain::DomainScope,
+    ) -> GeometricAttestation {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let a = GeometricAttestation {
+            schema_version: got_core::SCHEMA_VERSION,
+            model_id: "test-model".to_string(),
+            model_hash: Some([0x11; 32]),
+            precision: Precision::Fp32,
+            inner_product: InnerProduct::Causal,
+            input_hash: [0x22; 32],
+            timestamp: now,
+            corpus_version: "c1".to_string(),
+            probe_version: "p1".to_string(),
+            layer_readings: vec![vec![1.0, 2.0]],
+            confidence: vec![0.95],
+            coverage_flags: vec![false],
+            divergence_flag: false,
+            parent_attestation_hash: None,
+            geometry_hash: None,
+            geometry_drift: None,
+            causal_scores: vec![],
+            intervention_delta: None,
+            causal_flag: None,
+            sequence_number: 0,
+            directional_drifts: vec![],
+            probe_commitment: None,
+            density_reading: None,
+            curvature_reading: None,
+            domain_scope_declaration: Some(scope.to_declaration()),
+            signature: [0u8; 64],
+        };
+        assemble_and_sign(a, key).unwrap()
+    }
+
+    fn supply_scope() -> crate::domain::DomainScope {
+        use crate::domain::*;
+        DomainScope {
+            primary: Domain::parse("agriculture.supply-chain").unwrap(),
+            permitted: vec![PermittedDomain {
+                pattern: DomainPattern::parse("agriculture.*").unwrap(),
+                mode: InteractionMode::Cooperative,
+            }],
+            exclusions: vec![],
+        }
+    }
+
+    #[test]
+    fn scoped_attestation_binding_match_accepted() {
+        let alice = key_alice();
+        let bob = key_bob();
+
+        let a_scope = agri_scope();
+        let b_scope = supply_scope();
+        let registry = build_registry_with_domains(
+            &alice,
+            &bob,
+            Some(a_scope.clone()),
+            Some(b_scope.clone()),
+        );
+
+        let a_attest = make_scoped_attestation(&alice, &a_scope);
+        let b_attest = make_scoped_attestation(&bob, &b_scope);
+
+        let (result, responder_verdict) = perform_exchange(
+            &alice,
+            vec![],
+            a_attest,
+            &bob,
+            vec![],
+            b_attest,
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(responder_verdict, Verdict::Accepted, "{}", result.reason);
+        assert_eq!(result.our_verdict, Verdict::Accepted);
+    }
+
+    #[test]
+    fn scoped_attestation_binding_mismatch_rejected() {
+        use crate::domain::*;
+
+        let alice = key_alice();
+        let bob = key_bob();
+
+        // Alice is registered as agriculture, but her signed attestation
+        // claims to be in transport — the binding check must catch this.
+        let registered = agri_scope();
+        let claimed = DomainScope {
+            primary: Domain::parse("transport.autonomous-vehicle").unwrap(),
+            permitted: vec![PermittedDomain {
+                pattern: DomainPattern::parse("transport.*").unwrap(),
+                mode: InteractionMode::Cooperative,
+            }],
+            exclusions: vec![],
+        };
+        let registry =
+            build_registry_with_domains(&alice, &bob, Some(registered), Some(supply_scope()));
+
+        let a_attest = make_scoped_attestation(&alice, &claimed);
+        let b_attest = make_scoped_attestation(&bob, &supply_scope());
+
+        let (result, responder_verdict) = perform_exchange(
+            &alice,
+            vec![],
+            a_attest,
+            &bob,
+            vec![],
+            b_attest,
+            &registry,
+        )
+        .unwrap();
+
+        assert_eq!(responder_verdict, Verdict::Rejected);
+        assert!(
+            result.reason.contains("domain_scope_declaration")
+                || result.reason.contains("domain"),
+            "expected binding rejection, got: {}",
+            result.reason
+        );
+    }
+
+    /// A scoped attestation whose embedded declaration round-trips
+    /// through the canonical signing path verifies correctly (no ambient
+    /// bytes change depending on map ordering, float canonicalisation,
+    /// etc.).
+    #[test]
+    fn scoped_attestation_canonical_signature_verifies() {
+        let alice = key_alice();
+        let scope = agri_scope();
+        let attest = make_scoped_attestation(&alice, &scope);
+        got_attest::verify(&attest, &alice.verifying_key()).unwrap();
     }
 
     /// One peer unscoped → backwards-compatible: skip the domain check.

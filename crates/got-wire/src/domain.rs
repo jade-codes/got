@@ -10,6 +10,8 @@
 
 use serde::Deserialize;
 
+use got_core::{DomainScopeDeclaration, InteractionModeTag, PermittedDomainDeclaration};
+
 use crate::WireError;
 
 /// A dot-separated domain namespace, e.g. "agriculture.crop-management".
@@ -98,9 +100,24 @@ impl DomainPattern {
         }
     }
 
+    /// Canonical string form for serialisation.
+    /// Exact: "agriculture.crop-management"; wildcard: "agriculture.*";
+    /// global wildcard: "*".
+    pub fn canonical(&self) -> String {
+        if self.wildcard {
+            if self.prefix.is_empty() {
+                "*".to_string()
+            } else {
+                format!("{}.*", self.prefix)
+            }
+        } else {
+            self.prefix.clone()
+        }
+    }
+
     /// Specificity score used to break ties when several patterns match.
     /// Exact patterns dominate wildcards; longer prefixes dominate shorter.
-    fn specificity(&self) -> usize {
+    pub fn specificity(&self) -> usize {
         let base = self.prefix.len();
         if self.wildcard {
             base
@@ -110,17 +127,43 @@ impl DomainPattern {
     }
 }
 
-/// Interaction modes (§4.2).
+impl InteractionMode {
+    /// Convert to the wire-level tag carried in attestations (§2.1).
+    pub fn to_tag(self) -> InteractionModeTag {
+        match self {
+            InteractionMode::ReadOnly => InteractionModeTag::ReadOnly,
+            InteractionMode::Advisory => InteractionModeTag::Advisory,
+            InteractionMode::Cooperative => InteractionModeTag::Cooperative,
+            InteractionMode::Supervised => InteractionModeTag::Supervised,
+        }
+    }
+
+    pub fn from_tag(tag: InteractionModeTag) -> Self {
+        match tag {
+            InteractionModeTag::ReadOnly => InteractionMode::ReadOnly,
+            InteractionModeTag::Advisory => InteractionMode::Advisory,
+            InteractionModeTag::Cooperative => InteractionMode::Cooperative,
+            InteractionModeTag::Supervised => InteractionMode::Supervised,
+        }
+    }
+}
+
+/// Interaction modes (§4.2, §5.5).
 ///
 /// `ReadOnly`   — receive information only.
 /// `Advisory`   — provide non-binding recommendations.
 /// `Cooperative` — joint decision-making.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// `Supervised` — regulatory oversight with asymmetric disclosure (§5.5):
+///     the regulator may demand attestations from the supervised agent
+///     without producing one of its own, and the supervised agent must
+///     accept the regulator's cooperation refusals without challenge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InteractionMode {
     ReadOnly,
     Advisory,
     Cooperative,
+    Supervised,
 }
 
 /// A permitted-domain entry: which pattern is allowed and at what mode.
@@ -139,6 +182,49 @@ pub struct DomainScope {
 }
 
 impl DomainScope {
+    /// Serialise this scope into the wire-level declaration that travels
+    /// inside a signed attestation (§2.1).  String-based for stability.
+    pub fn to_declaration(&self) -> DomainScopeDeclaration {
+        DomainScopeDeclaration {
+            primary: self.primary.as_str().to_string(),
+            permitted: self
+                .permitted
+                .iter()
+                .map(|p| PermittedDomainDeclaration {
+                    pattern: p.pattern.canonical(),
+                    mode: p.mode.to_tag(),
+                })
+                .collect(),
+            exclusions: self
+                .exclusions
+                .iter()
+                .map(|p| p.canonical())
+                .collect(),
+        }
+    }
+
+    /// Parse a wire-level declaration back into a rich `DomainScope`,
+    /// re-validating every string through the domain / pattern parsers.
+    pub fn from_declaration(decl: &DomainScopeDeclaration) -> Result<Self, WireError> {
+        let primary = Domain::parse(&decl.primary)?;
+        let mut permitted = Vec::with_capacity(decl.permitted.len());
+        for p in &decl.permitted {
+            permitted.push(PermittedDomain {
+                pattern: DomainPattern::parse(&p.pattern)?,
+                mode: InteractionMode::from_tag(p.mode),
+            });
+        }
+        let mut exclusions = Vec::with_capacity(decl.exclusions.len());
+        for e in &decl.exclusions {
+            exclusions.push(DomainPattern::parse(e)?);
+        }
+        Ok(DomainScope {
+            primary,
+            permitted,
+            exclusions,
+        })
+    }
+
     /// Find the interaction mode this scope grants for `target`, if any.
     /// Most-specific matching pattern wins.
     pub fn mode_for(&self, target: &Domain) -> Option<InteractionMode> {
@@ -163,7 +249,10 @@ impl DomainScope {
 ///
 /// Both ReadOnly is the only structurally empty intersection: neither
 /// side is willing to transmit, so no exchange can take place.  Mixed
-/// modes (the asymmetric pattern in §5.2) are deliberately allowed.
+/// modes (the asymmetric patterns in §5.2 and §5.5) are deliberately
+/// allowed — including (Supervised, Supervised), which models the
+/// regulator ↔ supervised-agent relationship where the regulator
+/// demands an attestation without producing one of its own.
 fn modes_compatible(a: InteractionMode, b: InteractionMode) -> bool {
     !(a == InteractionMode::ReadOnly && b == InteractionMode::ReadOnly)
 }

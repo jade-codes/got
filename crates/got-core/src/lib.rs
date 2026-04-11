@@ -218,8 +218,9 @@ pub struct GeometricAttestation {
     pub coverage_flags: Vec<bool>,
     pub divergence_flag: bool,
 
-    // --- v2 chained attestation fields (None for v1) ---
-    /// SHA-256 of the serialised parent attestation. None for epoch 0 or v1.
+    // --- Chained-attestation fields (None = not part of a chain) ---
+    /// SHA-256 of the serialised parent attestation. None for chain anchors
+    /// or for agents that do not maintain an attestation chain.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -237,7 +238,7 @@ pub struct GeometricAttestation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry_drift: Option<f32>,
 
-    // --- v3 causal intervention fields (empty/None for v1/v2) ---
+    // --- Causal intervention fields (Tier 3: empty/None = not validated) ---
     /// Per-probe causal intervention results.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub causal_scores: Vec<CausalScoreRecord>,
@@ -248,7 +249,7 @@ pub struct GeometricAttestation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub causal_flag: Option<bool>,
 
-    // --- v3 adversarial hardening fields (Phase 13) ---
+    // --- Adversarial hardening fields (Phase 13) ---
     /// Monotonic sequence number assigned by the enclave.
     /// The enclave increments this on every attestation; the counter
     /// never resets. Gaps in the sequence indicate omitted attestations.
@@ -271,14 +272,21 @@ pub struct GeometricAttestation {
     )]
     pub probe_commitment: Option<[u8; 32]>,
 
-    // --- v4 manifold analysis fields ---
-    /// Manifold density reading under the causal metric. None for pre-v4 attestations.
+    // --- Manifold analysis fields (None = not computed) ---
+    /// Manifold density reading under the causal metric.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub density_reading: Option<manifold::DensityReading>,
 
-    /// Sectional curvature reading under the causal metric. None for pre-v4 attestations.
+    /// Sectional curvature reading under the causal metric.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub curvature_reading: Option<manifold::CurvatureReading>,
+
+    /// Embedded domain scope declaration (§2.1).  Always serialised into
+    /// the signed canonical bytes — a `None` encodes as a single 0x00 tag.
+    /// A verifier cross-checks this field against its trust registry's
+    /// entry for the same agent (see `got_wire::exchange`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_scope_declaration: Option<DomainScopeDeclaration>,
 
     /// Ed25519 over all preceding fields (canonical serialisation).
     #[serde(with = "hex64")]
@@ -354,20 +362,18 @@ impl UnembeddingMatrix {
 }
 
 // ---------------------------------------------------------------------------
-// Current schema version constant
+// Schema version constant
 // ---------------------------------------------------------------------------
-
-/// Wire-format version 1 (original, no chaining).
+//
+// There is exactly one wire format.  All attestation capabilities —
+// chaining, causal scores, manifold readings, embedded domain scope —
+// are expressed through Option fields that travel in the canonical
+// payload unconditionally.  Trust *tiers* (Tier 1/2/3 in the paper) are
+// content-based: they are derived by inspecting which fields are
+// populated, not by gating on a version number.  If the wire layout
+// ever needs to change in a way that breaks signature compatibility,
+// that is the one and only reason to bump this constant.
 pub const SCHEMA_VERSION: u16 = 1;
-
-/// Wire-format version 2 (chained attestation with geometry drift).
-pub const SCHEMA_VERSION_2: u16 = 2;
-
-/// Wire-format version 3 (causal intervention scores).
-pub const SCHEMA_VERSION_3: u16 = 3;
-
-/// Wire-format version 4 (manifold density reading).
-pub const SCHEMA_VERSION_4: u16 = 4;
 
 // ---------------------------------------------------------------------------
 // SHA-256 helper (used by multiple crates, centralised here)
@@ -389,6 +395,63 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 // Causal intervention score — result of a single causal_check call.
 // Stored in the attestation so verifiers can inspect causality evidence.
 // ---------------------------------------------------------------------------
+
+/// Interaction-mode tag for a `PermittedDomainDeclaration`.
+///
+/// This is the *wire* representation of `got_wire::domain::InteractionMode`.
+/// `got-core` cannot depend on `got-wire` (wire lives higher in the stack),
+/// so the structural mirror lives here and `got-wire` provides the
+/// bidirectional conversion.  Tag values must stay stable — they are part
+/// of the signed attestation payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+#[serde(rename_all = "kebab-case")]
+pub enum InteractionModeTag {
+    ReadOnly = 1,
+    Advisory = 2,
+    Cooperative = 3,
+    Supervised = 4,
+}
+
+impl InteractionModeTag {
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            1 => Some(Self::ReadOnly),
+            2 => Some(Self::Advisory),
+            3 => Some(Self::Cooperative),
+            4 => Some(Self::Supervised),
+            _ => None,
+        }
+    }
+}
+
+/// One entry in a `DomainScopeDeclaration`'s permitted list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermittedDomainDeclaration {
+    /// Pattern string, e.g. "agriculture.*" or "healthcare.drug-interaction".
+    pub pattern: String,
+    pub mode: InteractionModeTag,
+}
+
+/// Embedded domain scope declaration carried inside a signed
+/// `GeometricAttestation` (Protocol §2.1).
+///
+/// This is the attestation-level binding of an agent to its declared
+/// competence domain.  A verifier cross-checks this against the trust
+/// registry's entry for the same agent — relay attacks that substitute
+/// attestations across agents show up as a mismatch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainScopeDeclaration {
+    /// The agent's primary domain, e.g. "agriculture.crop-management".
+    pub primary: String,
+    /// Patterns this agent is authorised to interact with, and how.
+    pub permitted: Vec<PermittedDomainDeclaration>,
+    /// Patterns this agent is forbidden from interacting with.
+    pub exclusions: Vec<String>,
+}
 
 /// Record of one causal intervention probe check.
 #[derive(Debug, Clone, Serialize, Deserialize)]

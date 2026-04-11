@@ -288,7 +288,7 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use got_attest::serialise_for_signing;
     use got_core::{
-        CausalScoreRecord, GeometricAttestation, InnerProduct, Precision, SCHEMA_VERSION_3,
+        CausalScoreRecord, GeometricAttestation, InnerProduct, Precision, SCHEMA_VERSION,
     };
 
     fn test_key() -> SigningKey {
@@ -305,7 +305,7 @@ mod tests {
         causal_scores: Vec<CausalScoreRecord>,
     ) -> GeometricAttestation {
         let mut a = GeometricAttestation {
-            schema_version: SCHEMA_VERSION_3,
+            schema_version: SCHEMA_VERSION,
             model_id: model_id.to_string(),
             model_hash: Some([0xAA; 32]),
             precision: Precision::Fp32,
@@ -329,6 +329,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
         let payload = serialise_for_signing(&a).unwrap();

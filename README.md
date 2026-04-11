@@ -401,15 +401,20 @@ Preliminary results across 6 models (GPT-2, GPT-2 Medium, Qwen2.5-0.5B base/inst
 
 ## Trust Tiers
 
-The attestation schema supports four progressive levels of trust:
+All geometric attestations share a single canonical wire format
+(`SCHEMA_VERSION == 1`). Trust tiers are **content-based** — a verifier
+derives the tier by inspecting which fields the attestation populates.
+Governance policy (`GovernanceThresholds::require_chain` and
+`require_causal_validation`) then enforces a minimum tier per peer
+domain.
 
-| Tier | Schema | What It Proves |
+| Tier | Derived from | What It Proves |
 |---|---|---|
-| **Tier 0 — Behavioral** | B1 | Statistical value profile from observable outputs only (proxy, no model internals) |
-| **Tier 1 — Signature** | v1 | Ed25519 signature over deterministic canonical bytes |
-| **Tier 2 — Consistency** | v2 | Signature + parent chain hash + geometry drift bounds + coverage flags |
-| **Tier 3 — Reproduction** | v3 | Full re-extraction + re-probing + causal intervention scores + bitwise match |
-| **Tier 3+ — Manifold** | v4 | Tier 3 + manifold density reading + sectional curvature reading |
+| **Tier 0 — Behavioral** | `BehavioralAttestation` (B1, distinct struct) | Statistical value profile from observable outputs only (proxy, no model internals) |
+| **Tier 1 — Signature** | any valid `got_attest::verify` | Ed25519 signature over deterministic canonical bytes |
+| **Tier 2 — Consistency** | `parent_attestation_hash.is_some()` + chain drift within `max_drift` | Signature + parent chain hash + geometry drift bounds + coverage flags |
+| **Tier 3 — Causal Proof** | non-empty `causal_scores` with every record `is_causal == true` | Tier 2 + causal intervention scores proving probed directions are real mechanisms |
+| **Tier 3+ — Manifold** | `density_reading.is_some()` and/or `curvature_reading.is_some()` | Tier 3 + manifold density + sectional curvature |
 
 Tier 0 is specifically for closed-source models (GPT-4, Claude, Gemini) where internal activations are inaccessible. The proxy builds its own behavioral value space by embedding model outputs through a configurable embedding model (e.g. Ollama's nomic-embed-text) and measuring absolute cosine similarity against value concept anchors embedded through the same model. This ensures consistent measurement within a single embedding space. The proxy tracks value expression drift over time using Welford online statistics and EWMA recency weighting.
 

@@ -30,17 +30,11 @@ pub enum AttestationError {
     TimestampFuture { delta: u64, max: u64 },
 }
 
-/// Supported schema versions (v1 = original, v2 = chained attestation, v3 = causal intervention, v4 = manifold density).
-const SUPPORTED_SCHEMA_V1: u16 = 1;
-const SUPPORTED_SCHEMA_V2: u16 = 2;
-const SUPPORTED_SCHEMA_V3: u16 = 3;
-const SUPPORTED_SCHEMA_V4: u16 = 4;
-
+/// There is exactly one supported schema version.  All attestation
+/// capabilities are expressed through Option fields inside a single
+/// canonical layout — see `got_core::SCHEMA_VERSION` for the rationale.
 fn is_supported_schema(v: u16) -> bool {
-    v == SUPPORTED_SCHEMA_V1
-        || v == SUPPORTED_SCHEMA_V2
-        || v == SUPPORTED_SCHEMA_V3
-        || v == SUPPORTED_SCHEMA_V4
+    v == got_core::SCHEMA_VERSION
 }
 
 /// Sign an attestation. Serialises all fields except `signature` to canonical
@@ -162,7 +156,7 @@ pub fn serialise_for_signing(a: &GeometricAttestation) -> Result<Vec<u8>, Attest
 
     let mut buf = Vec::with_capacity(4096);
 
-    // === Common fields (v1 + v2) ===
+    // === Header + core probe fields ===
 
     // schema_version
     write_u16(&mut buf, a.schema_version);
@@ -217,155 +211,158 @@ pub fn serialise_for_signing(a: &GeometricAttestation) -> Result<Vec<u8>, Attest
     // divergence_flag
     buf.push(if a.divergence_flag { 0x01 } else { 0x00 });
 
-    // === v2 extension fields (chained attestation) ===
-    if a.schema_version >= SUPPORTED_SCHEMA_V2 {
-        // parent_attestation_hash: Option<[u8; 32]>
-        match &a.parent_attestation_hash {
-            None => buf.push(0x00),
-            Some(hash) => {
-                buf.push(0x01);
-                buf.extend_from_slice(hash);
-            }
+    // === Chained-attestation fields ===
+    // parent_attestation_hash: Option<[u8; 32]>
+    match &a.parent_attestation_hash {
+        None => buf.push(0x00),
+        Some(hash) => {
+            buf.push(0x01);
+            buf.extend_from_slice(hash);
         }
-        // geometry_hash: Option<[u8; 32]>
-        match &a.geometry_hash {
-            None => buf.push(0x00),
-            Some(hash) => {
-                buf.push(0x01);
-                buf.extend_from_slice(hash);
-            }
+    }
+    // geometry_hash: Option<[u8; 32]>
+    match &a.geometry_hash {
+        None => buf.push(0x00),
+        Some(hash) => {
+            buf.push(0x01);
+            buf.extend_from_slice(hash);
         }
-        // geometry_drift: Option<f32>
-        match a.geometry_drift {
-            None => buf.push(0x00),
-            Some(drift) => {
-                buf.push(0x01);
-                write_f32(&mut buf, drift, "geometry_drift")?;
-            }
+    }
+    // geometry_drift: Option<f32>
+    match a.geometry_drift {
+        None => buf.push(0x00),
+        Some(drift) => {
+            buf.push(0x01);
+            write_f32(&mut buf, drift, "geometry_drift")?;
         }
     }
 
-    // === v3 extension fields (causal intervention) ===
-    if a.schema_version >= SUPPORTED_SCHEMA_V3 {
-        // causal_scores: Vec<CausalScoreRecord>
-        write_u32(&mut buf, a.causal_scores.len() as u32);
-        for cs in &a.causal_scores {
-            write_f32(&mut buf, cs.delta_plus, "causal_scores.delta_plus")?;
-            write_f32(&mut buf, cs.delta_minus, "causal_scores.delta_minus")?;
-            write_f32(&mut buf, cs.consistency, "causal_scores.consistency")?;
-            buf.push(if cs.is_causal { 0x01 } else { 0x00 });
+    // === Causal intervention fields ===
+    // causal_scores: Vec<CausalScoreRecord>
+    write_u32(&mut buf, a.causal_scores.len() as u32);
+    for cs in &a.causal_scores {
+        write_f32(&mut buf, cs.delta_plus, "causal_scores.delta_plus")?;
+        write_f32(&mut buf, cs.delta_minus, "causal_scores.delta_minus")?;
+        write_f32(&mut buf, cs.consistency, "causal_scores.consistency")?;
+        buf.push(if cs.is_causal { 0x01 } else { 0x00 });
+    }
+    // intervention_delta: Option<f32>
+    match a.intervention_delta {
+        None => buf.push(0x00),
+        Some(d) => {
+            buf.push(0x01);
+            write_f32(&mut buf, d, "intervention_delta")?;
         }
-        // intervention_delta: Option<f32>
-        match a.intervention_delta {
-            None => buf.push(0x00),
-            Some(d) => {
-                buf.push(0x01);
-                write_f32(&mut buf, d, "intervention_delta")?;
-            }
-        }
-        // causal_flag: Option<bool>
-        match a.causal_flag {
-            None => buf.push(0x00),
-            Some(f) => {
-                buf.push(0x01);
-                buf.push(if f { 0x01 } else { 0x00 });
-            }
+    }
+    // causal_flag: Option<bool>
+    match a.causal_flag {
+        None => buf.push(0x00),
+        Some(f) => {
+            buf.push(0x01);
+            buf.push(if f { 0x01 } else { 0x00 });
         }
     }
 
-    // === Phase 13 fields (adversarial hardening) ===
-    // Gated to v2+ to preserve backward-compatible serialisation for v1 attestations.
-    // v1 attestations never participate in chains so they have no meaningful
-    // sequence_number or directional_drifts.
-    if a.schema_version >= SUPPORTED_SCHEMA_V2 {
-        // sequence_number: u64
-        write_u64(&mut buf, a.sequence_number);
-        // directional_drifts: Vec<DirectionalDrift>
-        write_u32(&mut buf, a.directional_drifts.len() as u32);
-        for dd in &a.directional_drifts {
-            write_string(&mut buf, &dd.probe_name);
-            write_f32(&mut buf, dd.drift, "directional_drift")?;
-        }
-        // probe_commitment: Option<[u8; 32]>
-        match &a.probe_commitment {
-            None => buf.push(0x00),
-            Some(hash) => {
-                buf.push(0x01);
-                buf.extend_from_slice(hash);
-            }
+    // === Adversarial hardening (Phase 13) ===
+    write_u64(&mut buf, a.sequence_number);
+    write_u32(&mut buf, a.directional_drifts.len() as u32);
+    for dd in &a.directional_drifts {
+        write_string(&mut buf, &dd.probe_name);
+        write_f32(&mut buf, dd.drift, "directional_drift")?;
+    }
+    // probe_commitment: Option<[u8; 32]>
+    match &a.probe_commitment {
+        None => buf.push(0x00),
+        Some(hash) => {
+            buf.push(0x01);
+            buf.extend_from_slice(hash);
         }
     }
 
-    // === v4 extension fields (manifold analysis) ===
-    if a.schema_version >= SUPPORTED_SCHEMA_V4 {
-        // density_reading: Option<DensityReading>
-        match &a.density_reading {
-            None => buf.push(0x00),
-            Some(dr) => {
-                buf.push(0x01);
-                write_u32(&mut buf, dr.points.len() as u32);
-                for p in &dr.points {
-                    write_f32(&mut buf, p.log_density, "density_reading.log_density")?;
-                    write_f32(&mut buf, p.intrinsic_dim, "density_reading.intrinsic_dim")?;
-                }
-                write_f32(
-                    &mut buf,
-                    dr.mean_intrinsic_dim,
-                    "density_reading.mean_intrinsic_dim",
-                )?;
-                write_f32(
-                    &mut buf,
-                    dr.std_intrinsic_dim,
-                    "density_reading.std_intrinsic_dim",
-                )?;
-                write_f32(
-                    &mut buf,
-                    dr.mean_log_density,
-                    "density_reading.mean_log_density",
-                )?;
-                write_u32(&mut buf, dr.k);
-                write_u32(&mut buf, dr.num_degenerate);
+    // === Manifold analysis fields ===
+    // density_reading: Option<DensityReading>
+    match &a.density_reading {
+        None => buf.push(0x00),
+        Some(dr) => {
+            buf.push(0x01);
+            write_u32(&mut buf, dr.points.len() as u32);
+            for p in &dr.points {
+                write_f32(&mut buf, p.log_density, "density_reading.log_density")?;
+                write_f32(&mut buf, p.intrinsic_dim, "density_reading.intrinsic_dim")?;
             }
+            write_f32(
+                &mut buf,
+                dr.mean_intrinsic_dim,
+                "density_reading.mean_intrinsic_dim",
+            )?;
+            write_f32(
+                &mut buf,
+                dr.std_intrinsic_dim,
+                "density_reading.std_intrinsic_dim",
+            )?;
+            write_f32(
+                &mut buf,
+                dr.mean_log_density,
+                "density_reading.mean_log_density",
+            )?;
+            write_u32(&mut buf, dr.k);
+            write_u32(&mut buf, dr.num_degenerate);
         }
-
-        // curvature_reading: Option<CurvatureReading>
-        match &a.curvature_reading {
-            None => buf.push(0x00),
-            Some(cr) => {
-                buf.push(0x01);
-                write_u32(&mut buf, cr.points.len() as u32);
-                for p in &cr.points {
+    }
+    // curvature_reading: Option<CurvatureReading>
+    match &a.curvature_reading {
+        None => buf.push(0x00),
+        Some(cr) => {
+            buf.push(0x01);
+            write_u32(&mut buf, cr.points.len() as u32);
+            for p in &cr.points {
+                write_f32(
+                    &mut buf,
+                    p.sectional_curvature,
+                    "curvature_reading.sectional_curvature",
+                )?;
+                write_u32(&mut buf, p.num_triangles);
+            }
+            write_f32(
+                &mut buf,
+                cr.mean_curvature,
+                "curvature_reading.mean_curvature",
+            )?;
+            write_f32(
+                &mut buf,
+                cr.std_curvature,
+                "curvature_reading.std_curvature",
+            )?;
+            match cr.curvature_uncertainty_correlation {
+                None => buf.push(0x00),
+                Some(r) => {
+                    buf.push(0x01);
                     write_f32(
                         &mut buf,
-                        p.sectional_curvature,
-                        "curvature_reading.sectional_curvature",
+                        r,
+                        "curvature_reading.curvature_uncertainty_correlation",
                     )?;
-                    write_u32(&mut buf, p.num_triangles);
                 }
-                write_f32(
-                    &mut buf,
-                    cr.mean_curvature,
-                    "curvature_reading.mean_curvature",
-                )?;
-                write_f32(
-                    &mut buf,
-                    cr.std_curvature,
-                    "curvature_reading.std_curvature",
-                )?;
-                // curvature_uncertainty_correlation: Option<f32>
-                match cr.curvature_uncertainty_correlation {
-                    None => buf.push(0x00),
-                    Some(r) => {
-                        buf.push(0x01);
-                        write_f32(
-                            &mut buf,
-                            r,
-                            "curvature_reading.curvature_uncertainty_correlation",
-                        )?;
-                    }
-                }
-                write_u32(&mut buf, cr.k);
-                write_u32(&mut buf, cr.num_degenerate);
+            }
+            write_u32(&mut buf, cr.k);
+            write_u32(&mut buf, cr.num_degenerate);
+        }
+    }
+
+    // === Embedded domain scope declaration (§2.1) ===
+    match &a.domain_scope_declaration {
+        None => buf.push(0x00),
+        Some(decl) => {
+            buf.push(0x01);
+            write_string(&mut buf, &decl.primary);
+            write_u32(&mut buf, decl.permitted.len() as u32);
+            for p in &decl.permitted {
+                write_string(&mut buf, &p.pattern);
+                buf.push(p.mode.as_u8());
+            }
+            write_u32(&mut buf, decl.exclusions.len() as u32);
+            for e in &decl.exclusions {
+                write_string(&mut buf, e);
             }
         }
     }
@@ -554,6 +551,7 @@ mod tests {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         }
     }

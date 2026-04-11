@@ -19,7 +19,7 @@
 
 use got_core::geometry::CausalGeometry;
 use got_core::{
-    CausalScoreRecord, GeometricAttestation, InnerProduct, Precision, SCHEMA_VERSION_3,
+    CausalScoreRecord, GeometricAttestation, InnerProduct, Precision, SCHEMA_VERSION,
 };
 
 use crate::intervention::{causal_check, CausalScore, ModelHandle, DEFAULT_CAUSAL_THRESHOLD};
@@ -460,7 +460,7 @@ impl MeasurementSidecar {
         };
 
         let attestation = GeometricAttestation {
-            schema_version: SCHEMA_VERSION_3,
+            schema_version: SCHEMA_VERSION,
             model_id: self.config.model_id.clone(),
             model_hash: self.config.model_hash,
             precision: self.config.precision,
@@ -484,6 +484,7 @@ impl MeasurementSidecar {
             probe_commitment: Some(self.probe_commitment),
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64], // caller signs
         };
 
@@ -757,7 +758,7 @@ mod tests {
         );
 
         let a = attestation.unwrap();
-        assert_eq!(a.schema_version, SCHEMA_VERSION_3);
+        assert_eq!(a.schema_version, SCHEMA_VERSION);
         assert_eq!(a.model_id, "test-model");
         assert!(!a.layer_readings[0].is_empty(), "should have readings");
         assert!(

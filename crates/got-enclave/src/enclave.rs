@@ -19,7 +19,7 @@ use thiserror::Error;
 
 use got_attest::assemble_and_sign;
 use got_core::geometry::CausalGeometry;
-use got_core::{GeometricAttestation, InnerProduct, Precision, SCHEMA_VERSION_3};
+use got_core::{GeometricAttestation, InnerProduct, Precision, SCHEMA_VERSION};
 use got_probe::intervention::{causal_check, CausalScore, ModelHandle, DEFAULT_CAUSAL_THRESHOLD};
 use got_probe::{read_probe, ProbeVector};
 
@@ -384,7 +384,7 @@ impl MeasurementEnclave for MockEnclave {
         let m = self.collect_measurements(model_id)?;
 
         let attestation = GeometricAttestation {
-            schema_version: SCHEMA_VERSION_3,
+            schema_version: SCHEMA_VERSION,
             model_id: model_id.to_string(),
             model_hash: Some(model_hash),
             precision: Precision::Fp32,
@@ -408,6 +408,7 @@ impl MeasurementEnclave for MockEnclave {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
 
@@ -429,7 +430,7 @@ impl MeasurementEnclave for MockEnclave {
         let m = self.collect_measurements(model_id)?;
 
         let attestation = GeometricAttestation {
-            schema_version: SCHEMA_VERSION_3,
+            schema_version: SCHEMA_VERSION,
             model_id: model_id.to_string(),
             model_hash: Some(model_hash),
             precision: Precision::Fp32,
@@ -453,6 +454,7 @@ impl MeasurementEnclave for MockEnclave {
             probe_commitment: None,
             density_reading: None,
             curvature_reading: None,
+            domain_scope_declaration: None,
             signature: [0u8; 64],
         };
 
@@ -670,7 +672,7 @@ mod tests {
 
         // Verify signature with enclave's public key.
         got_attest::verify(&attest, &enclave.verifying_key()).unwrap();
-        assert_eq!(attest.schema_version, SCHEMA_VERSION_3);
+        assert_eq!(attest.schema_version, SCHEMA_VERSION);
         assert_eq!(attest.model_id, "test-model");
         assert!(!attest.layer_readings.is_empty());
     }

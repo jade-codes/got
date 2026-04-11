@@ -111,7 +111,7 @@ MockEnclave simulates the enclave API but runs in the same process.
 │  │  ┌──────────────v───────────────────────────────────────────┐  │ │
 │  │  │  Layer 0: Core Types + Geometry (got-core)               │  │ │
 │  │  │    - CausalGeometry (Φ = UᵀU, Gram matrix)              │  │ │
-│  │  │    - GeometricAttestation (v1/v2/v3 schema)              │  │ │
+│  │  │    - GeometricAttestation (single canonical layout)      │  │ │
 │  │  │    - S-21: model_hash is Option<[u8; 32]>               │  │ │
 │  │  │    - sha256(), geometry_hash(), drift_from()             │  │ │
 │  │  │    - UnsignedAttestation newtype wrapper                 │  │ │
@@ -270,7 +270,7 @@ the agent runtime, host OS, and hypervisor cannot read.
        │ computes Φ = UᵀU
        │ runs probes: wᵀΦh + b
        │ runs causal checks: perturb h, observe y
-       │ assembles GeometricAttestation (v1/v2/v3)
+       │ assembles GeometricAttestation (single canonical layout)
        │   S-7/S-13/S-20 bounds checks
        │   S-21: model_hash is Option<[u8; 32]>
        │ signs with enclave-resident Ed25519 key

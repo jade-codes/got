@@ -15,6 +15,7 @@ use crate::certificate::{
     CertificateRevocationList,
 };
 use crate::domain::{Domain, DomainPattern, DomainScope, InteractionMode, PermittedDomain};
+use crate::governance::{GovernanceEntryToml, GovernanceTable};
 use crate::WireError;
 
 /// A trust registry mapping agent IDs to public keys and local policy.
@@ -64,6 +65,14 @@ pub struct AgentEntry {
     /// agent is treated as domain-unscoped (PoC default, backwards
     /// compatible).
     pub domain_scope: Option<DomainScope>,
+    /// Per-domain governance thresholds (§7.3 / §8.2).  Consulted in
+    /// validate_request / validate_response: when the peer's primary
+    /// domain matches one of these entries, the most-specific policy
+    /// overrides the flat `max_drift_accepted` and additionally enforces
+    /// min_confidence, min_causal_score, require_chain, and
+    /// require_causal_validation.  Empty table = fall back to the flat
+    /// per-agent defaults.
+    pub governance_table: GovernanceTable,
 }
 
 /// Compute the canonical agent ID for a public key.
@@ -214,6 +223,7 @@ impl TrustRegistry {
             expected_model_hash: cert.expected_model_hash,
             certificate: Some(cert.clone()),
             domain_scope: old_entry.domain_scope,
+            governance_table: old_entry.governance_table,
         };
 
         self.agents.insert(new_agent_id, new_entry);
@@ -269,7 +279,7 @@ impl TrustRegistry {
         };
 
         if let Some(agents) = parsed.agents {
-            for a in agents {
+            for mut a in agents {
                 let pk_bytes = parse_hex_32(&a.public_key)
                     .map_err(|e| WireError::RegistryParse(format!("agent {}: {}", a.id, e)))?;
                 let pk = VerifyingKey::from_bytes(&pk_bytes).map_err(|e| {
@@ -289,6 +299,16 @@ impl TrustRegistry {
 
                 let domain_scope = parse_domain_scope(&a)?;
 
+                let mut governance_entries = Vec::new();
+                if let Some(rows) = a.governance_thresholds.take() {
+                    for row in rows {
+                        governance_entries.push(row.into_entry(&a.id)?);
+                    }
+                }
+                let governance_table = GovernanceTable {
+                    entries: governance_entries,
+                };
+
                 registry.add_agent(AgentEntry {
                     name: a.id,
                     public_key: pk,
@@ -298,6 +318,7 @@ impl TrustRegistry {
                     expected_model_hash,
                     certificate: None,
                     domain_scope,
+                    governance_table,
                 });
             }
         }
@@ -371,6 +392,7 @@ struct AgentToml {
     primary_domain: Option<String>,
     permitted_domains: Option<Vec<PermittedDomainToml>>,
     exclusion_domains: Option<Vec<String>>,
+    governance_thresholds: Option<Vec<GovernanceEntryToml>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -610,6 +632,7 @@ public_key = "ZZZZ"
             expected_model_hash: None,
             certificate: None,
             domain_scope: None,
+            governance_table: GovernanceTable::default(),
         });
 
         assert!(registry.lookup(&id).is_some());

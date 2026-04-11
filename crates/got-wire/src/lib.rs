@@ -17,6 +17,7 @@ pub mod domain;
 pub mod envelope;
 pub mod exchange;
 pub mod frame;
+pub mod governance;
 pub mod noise;
 pub mod registry;
 

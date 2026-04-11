@@ -11,7 +11,6 @@ use ed25519_dalek::SigningKey;
 use got_attest::{assemble_and_sign, serialise_for_signing, verify};
 use got_core::geometry::CausalGeometry;
 use got_core::{GeometricAttestation, InnerProduct, Precision, UnembeddingMatrix, SCHEMA_VERSION};
-use got_core::{SCHEMA_VERSION_2, SCHEMA_VERSION_3};
 use got_probe::hooks::{
     detect_distribution_shift, ActivationStats, CollectingHook, MeasurementHook,
     MeasurementSidecar, SidecarConfig,
@@ -117,6 +116,7 @@ fn produce_attestation(timestamp: u64) -> GeometricAttestation {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
 
@@ -335,6 +335,7 @@ fn produce_attestation_for_profile(profile: &ModelProfile, timestamp: u64) -> Ge
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
 
@@ -637,12 +638,13 @@ fn precision_variants_all_work() {
 //
 // These tests prove:
 //  1. causal_check distinguishes causal from non-causal probes end-to-end.
-//  2. Schema v3 attestation (with causal fields) signs and verifies correctly.
-//  3. Schema v1 and v2 attestations remain verifiable (backward compat).
+//  2. A Tier-3 attestation (with causal fields populated) signs and verifies.
+//  3. Tier-1 (bare) and Tier-2 (chained) attestations still round-trip
+//     through the single canonical layout.
 //  4. End-to-end: sample probes → intervene → attest with causal_flag → verify.
 // ===========================================================================
 
-/// Build a signed v3 attestation with causal intervention scores.
+/// Build a signed Tier-3 attestation with causal intervention scores.
 fn produce_causal_attestation(timestamp: u64) -> GeometricAttestation {
     // 1. Synthetic unembedding (4×3)
     let u = UnembeddingMatrix::new(
@@ -697,11 +699,11 @@ fn produce_causal_attestation(timestamp: u64) -> GeometricAttestation {
     // 4. Run regular probe reading too
     let (raw, conf, coverage_flag) = read_probe(&probe, &test_h, &geometry).unwrap();
 
-    // 5. Build v3 attestation
+    // 5. Build the Tier-3 attestation
     let input_hash = got_core::sha256(&[1, 2, 3, 4]);
 
     let attestation = GeometricAttestation {
-        schema_version: SCHEMA_VERSION_3,
+        schema_version: SCHEMA_VERSION,
         model_id: "synthetic-causal-test".to_string(),
         model_hash: Some([0xAA; 32]),
         precision: Precision::Fp32,
@@ -725,6 +727,7 @@ fn produce_causal_attestation(timestamp: u64) -> GeometricAttestation {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
 
@@ -741,10 +744,11 @@ fn v3_causal_attestation_sign_and_verify() {
     let key = test_key();
     let attestation = produce_causal_attestation(1709568000);
 
-    verify(&attestation, &key.verifying_key()).expect("v3 causal attestation should verify");
+    verify(&attestation, &key.verifying_key())
+        .expect("Tier-3 causal attestation should verify");
 
     // Check causal fields are populated
-    assert_eq!(attestation.schema_version, SCHEMA_VERSION_3);
+    assert_eq!(attestation.schema_version, SCHEMA_VERSION);
     assert!(!attestation.causal_scores.is_empty());
     assert!(attestation.intervention_delta.is_some());
     assert!(attestation.causal_flag.is_some());
@@ -786,7 +790,7 @@ fn v3_serialise_for_signing_is_pure() {
     let baseline = serialise_for_signing(&attestation).unwrap();
     for i in 0..100 {
         let bytes = serialise_for_signing(&attestation).unwrap();
-        assert_eq!(baseline, bytes, "v3 serialisation differed on iter {i}");
+        assert_eq!(baseline, bytes, "canonical serialisation differed on iter {i}");
     }
 }
 
@@ -833,20 +837,21 @@ fn v3_tamper_intervention_delta_detected() {
 }
 
 // ---------------------------------------------------------------------------
-// Backward compatibility: v1 and v2 still work
+// Tier-1 (bare) and Tier-2 (chained) attestations still round-trip
+// through the single canonical layout.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn v1_attestation_still_verifiable_after_v3() {
+fn tier_1_bare_attestation_round_trips() {
     let key = test_key();
-    let a = produce_attestation(1709568000); // v1
+    let a = produce_attestation(1709568000); // bare Tier-1
     assert_eq!(a.schema_version, SCHEMA_VERSION);
-    verify(&a, &key.verifying_key()).expect("v1 must remain verifiable");
+    verify(&a, &key.verifying_key()).expect("Tier-1 attestation must verify");
 }
 
 #[test]
-fn v2_attestation_still_verifiable_after_v3() {
-    // Build a v2 attestation (chained, no causal fields)
+fn tier_2_chained_attestation_round_trips() {
+    // Build a Tier-2 attestation (chained, no causal fields)
     let u = UnembeddingMatrix::new(
         4,
         3,
@@ -866,8 +871,8 @@ fn v2_attestation_still_verifiable_after_v3() {
     let (raw, conf, flag) = read_probe(&probe, &[1.0, 2.0, 1.5], &geometry).unwrap();
 
     let attestation = GeometricAttestation {
-        schema_version: SCHEMA_VERSION_2,
-        model_id: "v2-test".to_string(),
+        schema_version: SCHEMA_VERSION,
+        model_id: "tier-2-test".to_string(),
         model_hash: Some([0xBB; 32]),
         precision: Precision::Fp32,
         inner_product: InnerProduct::Causal,
@@ -890,12 +895,13 @@ fn v2_attestation_still_verifiable_after_v3() {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
 
     let key = test_key();
     let signed = assemble_and_sign(attestation, &key).unwrap();
-    verify(&signed, &key.verifying_key()).expect("v2 must remain verifiable after v3 additions");
+    verify(&signed, &key.verifying_key()).expect("Tier-2 chained attestation must verify");
 }
 
 // ---------------------------------------------------------------------------
@@ -966,7 +972,7 @@ fn causal_attestation_flow_end_to_end() {
         scores.push(score.to_record());
     }
 
-    // 4. Build v3 attestation with causal fields
+    // 4. Build a Tier-3 attestation with causal fields
     let mut readings = Vec::new();
     let mut confs = Vec::new();
     let mut flags = Vec::new();
@@ -978,7 +984,7 @@ fn causal_attestation_flow_end_to_end() {
     }
 
     let attestation = GeometricAttestation {
-        schema_version: SCHEMA_VERSION_3,
+        schema_version: SCHEMA_VERSION,
         model_id: "flow-test".to_string(),
         model_hash: Some([0xCC; 32]),
         precision: Precision::Fp32,
@@ -1002,6 +1008,7 @@ fn causal_attestation_flow_end_to_end() {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
 
@@ -1021,7 +1028,8 @@ fn causal_attestation_flow_end_to_end() {
     // 7. JSON round-trip preserves causal fields
     let json = serde_json::to_string_pretty(&signed).unwrap();
     let deser: GeometricAttestation = serde_json::from_str(&json).unwrap();
-    verify(&deser, &key.verifying_key()).expect("JSON round-tripped v3 attestation should verify");
+    verify(&deser, &key.verifying_key())
+        .expect("JSON round-tripped Tier-3 attestation should verify");
     assert_eq!(deser.causal_scores.len(), 3);
     assert_eq!(deser.causal_flag, Some(true));
 }
@@ -1149,7 +1157,7 @@ fn sidecar_end_to_end_signed_chain() {
         }
 
         let unsigned = attestation.expect("window should close");
-        assert_eq!(unsigned.schema_version, SCHEMA_VERSION_3);
+        assert_eq!(unsigned.schema_version, SCHEMA_VERSION);
 
         // Sign it
         let signed = assemble_and_sign(unsigned, &key).unwrap();
@@ -1421,6 +1429,7 @@ fn wire_registry(alice: &SigningKey, bob: &SigningKey) -> TrustRegistry {
         expected_model_hash: None,
         certificate: None,
         domain_scope: None,
+        governance_table: got_wire::governance::GovernanceTable::default(),
     });
     registry.add_agent(AgentEntry {
         name: "bob".to_string(),
@@ -1431,6 +1440,7 @@ fn wire_registry(alice: &SigningKey, bob: &SigningKey) -> TrustRegistry {
         expected_model_hash: None,
         certificate: None,
         domain_scope: None,
+        governance_table: got_wire::governance::GovernanceTable::default(),
     });
     registry
 }
@@ -1477,6 +1487,7 @@ fn wire_make_v1_seq(key: &SigningKey, seq: u64) -> GeometricAttestation {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
     assemble_and_sign(a, key).unwrap()
@@ -1498,7 +1509,7 @@ fn wire_make_v2_child_seq(
 ) -> GeometricAttestation {
     let parent_hash = attestation_hash(parent).unwrap();
     let a = GeometricAttestation {
-        schema_version: SCHEMA_VERSION_2,
+        schema_version: SCHEMA_VERSION,
         model_id: "wire-test-model".to_string(),
         model_hash: Some([0x11; 32]),
         precision: Precision::Fp32,
@@ -1522,6 +1533,7 @@ fn wire_make_v2_child_seq(
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
     assemble_and_sign(a, key).unwrap()
@@ -1681,7 +1693,7 @@ fn wire_chain_walk_broken_link_rejected() {
     let a0 = wire_make_v1(&key);
     // Build a child that points to a different parent.
     let mut bad = GeometricAttestation {
-        schema_version: SCHEMA_VERSION_2,
+        schema_version: SCHEMA_VERSION,
         model_id: "wire-test-model".to_string(),
         model_hash: Some([0x11; 32]),
         precision: Precision::Fp32,
@@ -1705,6 +1717,7 @@ fn wire_chain_walk_broken_link_rejected() {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
     bad = assemble_and_sign(bad, &key).unwrap();
@@ -1905,7 +1918,7 @@ fn enclave_capture_to_attestation() {
         .unwrap();
 
     verify(&attest, &enclave.verifying_key()).unwrap();
-    assert_eq!(attest.schema_version, SCHEMA_VERSION_3);
+    assert_eq!(attest.schema_version, SCHEMA_VERSION);
     assert!(!attest.layer_readings.is_empty());
 }
 
@@ -2155,6 +2168,7 @@ fn enclave_attestation_wire_exchange() {
         expected_model_hash: None,
         certificate: None,
         domain_scope: None,
+        governance_table: got_wire::governance::GovernanceTable::default(),
     });
     registry.add_agent(AgentEntry {
         name: "bob-enclave".to_string(),
@@ -2165,6 +2179,7 @@ fn enclave_attestation_wire_exchange() {
         expected_model_hash: None,
         certificate: None,
         domain_scope: None,
+        governance_table: got_wire::governance::GovernanceTable::default(),
     });
 
     // Perform wire protocol exchange between enclave-attested agents.
@@ -2202,7 +2217,7 @@ fn store_attestation(
 ) -> got_core::GeometricAttestation {
     use ed25519_dalek::Signer;
     let mut a = got_core::GeometricAttestation {
-        schema_version: SCHEMA_VERSION_3,
+        schema_version: SCHEMA_VERSION,
         model_id: model_id.to_string(),
         model_hash: Some([0xAA; 32]),
         precision: got_core::Precision::Fp32,
@@ -2239,6 +2254,7 @@ fn store_attestation(
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
     let payload = serialise_for_signing(&a).unwrap();
@@ -2631,7 +2647,7 @@ fn phase13_verify_chain_rejects_duplicate_seq() {
     let key = phase13_enclave_key();
 
     let a0 = GeometricAttestation {
-        schema_version: SCHEMA_VERSION_3,
+        schema_version: SCHEMA_VERSION,
         model_id: "dupe-m".to_string(),
         model_hash: Some([0xAA; 32]),
         precision: Precision::Fp32,
@@ -2655,6 +2671,7 @@ fn phase13_verify_chain_rejects_duplicate_seq() {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
     let a0 = assemble_and_sign(a0, &key).unwrap();
@@ -2662,7 +2679,7 @@ fn phase13_verify_chain_rejects_duplicate_seq() {
 
     // Second attestation with SAME sequence_number 0
     let a1 = GeometricAttestation {
-        schema_version: SCHEMA_VERSION_3,
+        schema_version: SCHEMA_VERSION,
         model_id: "dupe-m".to_string(),
         model_hash: Some([0xAA; 32]),
         precision: Precision::Fp32,
@@ -2686,6 +2703,7 @@ fn phase13_verify_chain_rejects_duplicate_seq() {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
     let a1 = assemble_and_sign(a1, &key).unwrap();
@@ -2896,7 +2914,7 @@ fn phase13_directional_drifts_in_signed_payload() {
     let key = phase13_enclave_key();
 
     let attest = GeometricAttestation {
-        schema_version: SCHEMA_VERSION_3,
+        schema_version: SCHEMA_VERSION,
         model_id: "dd-m".to_string(),
         model_hash: Some([0xAA; 32]),
         precision: Precision::Fp32,
@@ -2920,6 +2938,7 @@ fn phase13_directional_drifts_in_signed_payload() {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
     let mut signed = assemble_and_sign(attest, &key).unwrap();
@@ -3079,6 +3098,7 @@ fn sec_model_hash_option_none_is_distinct() {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
     a_none = assemble_and_sign(a_none, &key).unwrap();
@@ -3114,6 +3134,7 @@ fn sec_model_hash_option_none_is_distinct() {
         probe_commitment: None,
         density_reading: None,
         curvature_reading: None,
+        domain_scope_declaration: None,
         signature: [0u8; 64],
     };
     a_zero = assemble_and_sign(a_zero, &key).unwrap();

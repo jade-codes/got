@@ -47,26 +47,26 @@ graph TB
         direction TB
         READ_PROBE["read_probe(probe, h, geometry)<br/>raw = wᵀΦh + b<br/>conf = σ(platt_scale·raw + shift)<br/>flag = conf < threshold"]
 
-        V1["v1 — Frozen Model<br/>(Tier 1: Signature)"]
-        V2["v2 — Chained After Update<br/>(Tier 2: Consistency + Drift)"]
-        V3["v3 — Causal Intervention<br/>(Tier 3: Reproduction)"]
+        TIER1["Tier 1 — Signature<br/>(any signed attestation)"]
+        TIER2["Tier 2 — Consistency + Chain<br/>(parent_attestation_hash populated)"]
+        TIER3["Tier 3 — Causal Proof<br/>(causal_scores populated, all causal)"]
 
-        ASSEMBLE["assemble_and_sign(attest, sk)<br/>S-7: timestamp ≤ now+300s<br/>S-13: strings ≤ 256 bytes<br/>S-20: ≤1024 layers, ≤65536 readings"]
-        CANON["serialise_for_signing()<br/>Canonical LE bytes"]
+        ASSEMBLE["assemble_and_sign(attest, sk)<br/>S-7: timestamp ≤ now+300s<br/>S-13: strings ≤ 256 bytes<br/>S-20: ≤1024 layers, ≤65536 readings<br/>Single canonical layout (SCHEMA_VERSION=1)"]
+        CANON["serialise_for_signing()<br/>Linear canonical LE bytes"]
         SIGN["Ed25519 Sign"]
         SIGNED_ATT["Signed GeometricAttestation"]
 
         PROBE_SET --> READ_PROBE
-        READ_PROBE --> V1
-        READ_PROBE --> V2
-        READ_PROBE --> V3
-        V1 --> ASSEMBLE
-        V2 --> ASSEMBLE
-        V3 --> ASSEMBLE
+        READ_PROBE --> TIER1
+        READ_PROBE --> TIER2
+        READ_PROBE --> TIER3
+        TIER1 --> ASSEMBLE
+        TIER2 --> ASSEMBLE
+        TIER3 --> ASSEMBLE
         ASSEMBLE --> CANON --> SIGN --> SIGNED_ATT
     end
 
-    subgraph causal["Causal Intervention (v3 only)"]
+    subgraph causal["Causal Intervention (Tier 3 only)"]
         PERTURB["Perturb activations<br/>ŵ_c = Φw / ‖Φw‖<br/>h⁺ = h + δ·ŵ_c<br/>h⁻ = h − δ·ŵ_c"]
         MODEL_FN["model(h⁺), model(h⁻)"]
         CAUSAL_SCORE["CausalScore {<br/>delta_plus, delta_minus,<br/>consistency, is_causal }"]
@@ -111,14 +111,18 @@ graph TB
             ENV_FIELDS["nonce [32B] ‖ peer_agent_id [32B]<br/>‖ attestation_hash [32B]<br/>‖ chain_root [32B] ‖ timestamp [8B]<br/>+ Ed25519 sig [64B]<br/>S-9: verified flag"]
         end
 
-        DOMAIN_CHECK["Phase 0:<br/>check_domain_compatibility()<br/>(§4 / Appendix B)<br/>exclusions ✓ | bidirectional<br/>permission ✓ | mode<br/>intersection ✓<br/>STRUCTURAL — runs first"]
+        DOMAIN_CHECK["Phase 0:<br/>check_domain_compatibility()<br/>(§4 / Appendix B)<br/>exclusions ✓ | bidirectional<br/>permission ✓ | mode<br/>intersection ✓<br/>Supervised pair OK (§5.5)<br/>STRUCTURAL — runs first"]
+
+        GOVERNANCE["§7.3 / §8.2:<br/>effective_thresholds(self, peer)<br/>enforce_governance()<br/>→ max_drift, min_confidence,<br/>require_chain (Tier 2+),<br/>require_causal_validation<br/>(Tier 3)"]
+
+        SCOPE_BIND["§2.1:<br/>check_attestation_scope_binding()<br/>embedded DomainScopeDeclaration<br/>↔ registry agreement"]
 
         VALIDATE_REQ["validate_request()<br/>Ed25519 sig ✓ | peer_id ✓<br/>attest_hash ✓ | chain_root ✓<br/>timestamp freshness ✓"]
         VALIDATE_RSP["validate_response()"]
 
-        CHAIN_VERIFY["verify_chain(chain, current,<br/>&[VerifyingKey], max_drift)<br/>S-8: key rotation support<br/>→ ChainVerdict"]
+        CHAIN_VERIFY["verify_chain(chain, current,<br/>&[VerifyingKey], max_drift)<br/>S-8: key rotation support<br/>max_drift from effective<br/>GovernanceThresholds<br/>→ ChainVerdict"]
 
-        REGISTRY["TrustRegistry (TOML)<br/>S-2: SHA-256 integrity on load<br/>AgentEntry { agent_id,<br/>expected_model_hash,<br/>max_drift, roles,<br/>domain_scope }<br/>max_attestation_age_secs"]
+        REGISTRY["TrustRegistry (TOML)<br/>S-2: SHA-256 integrity on load<br/>AgentEntry { agent_id,<br/>expected_model_hash,<br/>max_drift, roles,<br/>domain_scope,<br/>governance_table }<br/>max_attestation_age_secs"]
 
         DECIDE{"Both Accepted?"}
         COOPERATE["✅ Cooperate"]
@@ -132,8 +136,10 @@ graph TB
         RSP --> FRAME
         VALIDATE_RSP --> CHAIN_VERIFY
         REGISTRY --> DOMAIN_CHECK
-        DOMAIN_CHECK --> VALIDATE_REQ
-        DOMAIN_CHECK --> VALIDATE_RSP
+        DOMAIN_CHECK --> GOVERNANCE
+        GOVERNANCE --> SCOPE_BIND
+        SCOPE_BIND --> VALIDATE_REQ
+        SCOPE_BIND --> VALIDATE_RSP
         REGISTRY --> VALIDATE_REQ
         REGISTRY --> VALIDATE_RSP
         CHAIN_VERIFY --> DECIDE
