@@ -13,6 +13,7 @@
 pub mod behavioral;
 pub mod certificate;
 pub mod chain;
+pub mod domain;
 pub mod envelope;
 pub mod exchange;
 pub mod frame;
@@ -76,6 +77,14 @@ pub enum WireError {
     CrlSignatureInvalid,
     #[error("CRL issuer does not match expected CA key")]
     CrlIssuerMismatch,
+    #[error("domain parse error: {0}")]
+    DomainParse(String),
+    #[error("domain {target} excluded by agent in {excluder}")]
+    DomainExcluded { excluder: String, target: String },
+    #[error("agent in domain {from} not permitted to interact with {target}")]
+    DomainNotPermitted { from: String, target: String },
+    #[error("interaction modes incompatible: {a} vs {b}")]
+    DomainModeIncompatible { a: String, b: String },
     #[error("protocol error: {0}")]
     Protocol(String),
     #[error("io error: {0}")]

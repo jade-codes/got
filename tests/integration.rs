@@ -1420,6 +1420,7 @@ fn wire_registry(alice: &SigningKey, bob: &SigningKey) -> TrustRegistry {
         roles: vec!["producer".to_string()],
         expected_model_hash: None,
         certificate: None,
+        domain_scope: None,
     });
     registry.add_agent(AgentEntry {
         name: "bob".to_string(),
@@ -1429,6 +1430,7 @@ fn wire_registry(alice: &SigningKey, bob: &SigningKey) -> TrustRegistry {
         roles: vec!["verifier".to_string()],
         expected_model_hash: None,
         certificate: None,
+        domain_scope: None,
     });
     registry
 }
@@ -2152,6 +2154,7 @@ fn enclave_attestation_wire_exchange() {
         roles: vec!["producer".to_string()],
         expected_model_hash: None,
         certificate: None,
+        domain_scope: None,
     });
     registry.add_agent(AgentEntry {
         name: "bob-enclave".to_string(),
@@ -2161,6 +2164,7 @@ fn enclave_attestation_wire_exchange() {
         roles: vec!["producer".to_string()],
         expected_model_hash: None,
         certificate: None,
+        domain_scope: None,
     });
 
     // Perform wire protocol exchange between enclave-attested agents.

@@ -13,6 +13,7 @@ use ed25519_dalek::SigningKey;
 use got_core::GeometricAttestation;
 
 use crate::chain::{attestation_hash, verify_chain};
+use crate::domain::check_domain_compatibility;
 use crate::envelope::ExchangeEnvelope;
 use crate::registry::{compute_agent_id, TrustRegistry};
 use crate::WireError;
@@ -195,6 +196,21 @@ pub fn validate_request(
         ));
     }
 
+    // 1c. Phase 0 — domain compatibility (§4 / Appendix B).
+    //     If both peers have a declared domain scope, the bidirectional
+    //     compatibility check runs *before* any cryptographic or geometric
+    //     verification.  Domain incompatibility is structural and cannot be
+    //     overridden by high probe readings or governance dispensation.
+    if let Some(self_entry) = registry.lookup(own_agent_id) {
+        if let (Some(peer_scope), Some(self_scope)) =
+            (entry.domain_scope.as_ref(), self_entry.domain_scope.as_ref())
+        {
+            if let Err(e) = check_domain_compatibility(peer_scope, self_scope) {
+                return Ok((Verdict::Rejected, format!("domain incompatible: {e}")));
+            }
+        }
+    }
+
     // 2. Verify envelope signature + bindings.
     let chain_anchor = req.chain.first();
     if let Err(e) = req.envelope.verify(
@@ -325,6 +341,17 @@ pub fn validate_response(
             Verdict::Rejected,
             format!("certificate validation failed: {e}"),
         ));
+    }
+
+    // 1c. Phase 0 — domain compatibility (§4 / Appendix B).
+    if let Some(self_entry) = registry.lookup(own_agent_id) {
+        if let (Some(peer_scope), Some(self_scope)) =
+            (entry.domain_scope.as_ref(), self_entry.domain_scope.as_ref())
+        {
+            if let Err(e) = check_domain_compatibility(peer_scope, self_scope) {
+                return Ok((Verdict::Rejected, format!("domain incompatible: {e}")));
+            }
+        }
     }
 
     // 2. Verify envelope (must echo our nonce).
@@ -594,6 +621,7 @@ mod tests {
             roles: vec!["producer".to_string()],
             expected_model_hash: None,
             certificate: None,
+            domain_scope: None,
         });
         registry.add_agent(AgentEntry {
             name: "bob".to_string(),
@@ -603,6 +631,7 @@ mod tests {
             roles: vec!["verifier".to_string()],
             expected_model_hash: None,
             certificate: None,
+            domain_scope: None,
         });
 
         registry
@@ -870,5 +899,156 @@ mod tests {
             reason.contains("future") || reason.contains("expired") || reason.contains("old"),
             "expected temporal rejection, got: {reason}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Domain scoping (§4 / Appendix B)
+    // -----------------------------------------------------------------------
+
+    fn build_registry_with_domains(
+        alice: &SigningKey,
+        bob: &SigningKey,
+        alice_scope: Option<crate::domain::DomainScope>,
+        bob_scope: Option<crate::domain::DomainScope>,
+    ) -> TrustRegistry {
+        let mut registry = TrustRegistry::empty();
+        let alice_pk = alice.verifying_key();
+        let bob_pk = bob.verifying_key();
+
+        registry.add_agent(AgentEntry {
+            name: "alice".to_string(),
+            public_key: alice_pk,
+            agent_id: compute_agent_id(&alice_pk),
+            max_drift_accepted: 0.05,
+            roles: vec!["producer".to_string()],
+            expected_model_hash: None,
+            certificate: None,
+            domain_scope: alice_scope,
+        });
+        registry.add_agent(AgentEntry {
+            name: "bob".to_string(),
+            public_key: bob_pk,
+            agent_id: compute_agent_id(&bob_pk),
+            max_drift_accepted: 0.05,
+            roles: vec!["verifier".to_string()],
+            expected_model_hash: None,
+            certificate: None,
+            domain_scope: bob_scope,
+        });
+        registry
+    }
+
+    fn agri_scope() -> crate::domain::DomainScope {
+        use crate::domain::*;
+        DomainScope {
+            primary: Domain::parse("agriculture.crop-management").unwrap(),
+            permitted: vec![PermittedDomain {
+                pattern: DomainPattern::parse("agriculture.*").unwrap(),
+                mode: InteractionMode::Cooperative,
+            }],
+            exclusions: vec![DomainPattern::parse("transport.*").unwrap()],
+        }
+    }
+
+    fn vehicle_scope() -> crate::domain::DomainScope {
+        use crate::domain::*;
+        DomainScope {
+            primary: Domain::parse("transport.autonomous-vehicle").unwrap(),
+            permitted: vec![PermittedDomain {
+                pattern: DomainPattern::parse("transport.*").unwrap(),
+                mode: InteractionMode::Cooperative,
+            }],
+            exclusions: vec![],
+        }
+    }
+
+    /// Use case §5.1: agri ↔ vehicle exchange must be rejected at Phase 0,
+    /// before envelope/attestation/chain verification.
+    #[test]
+    fn exchange_rejected_by_domain_phase_0() {
+        let alice = key_alice();
+        let bob = key_bob();
+        let registry =
+            build_registry_with_domains(&alice, &bob, Some(agri_scope()), Some(vehicle_scope()));
+
+        let alice_attest = make_v1(&alice);
+        let bob_attest = make_v1(&bob);
+
+        let (result, responder_verdict) = perform_exchange(
+            &alice,
+            vec![],
+            alice_attest,
+            &bob,
+            vec![],
+            bob_attest,
+            &registry,
+        )
+        .unwrap();
+
+        assert_eq!(responder_verdict, Verdict::Rejected);
+        assert!(
+            result.reason.contains("domain"),
+            "expected domain rejection, got: {}",
+            result.reason
+        );
+    }
+
+    /// Compatible domains (both within agriculture.*) must succeed.
+    #[test]
+    fn exchange_accepted_when_domains_compatible() {
+        use crate::domain::*;
+        let alice = key_alice();
+        let bob = key_bob();
+        let supply = DomainScope {
+            primary: Domain::parse("agriculture.supply-chain").unwrap(),
+            permitted: vec![PermittedDomain {
+                pattern: DomainPattern::parse("agriculture.*").unwrap(),
+                mode: InteractionMode::Cooperative,
+            }],
+            exclusions: vec![],
+        };
+        let registry = build_registry_with_domains(&alice, &bob, Some(agri_scope()), Some(supply));
+
+        let alice_attest = make_v1(&alice);
+        let bob_attest = make_v1(&bob);
+
+        let (result, responder_verdict) = perform_exchange(
+            &alice,
+            vec![],
+            alice_attest,
+            &bob,
+            vec![],
+            bob_attest,
+            &registry,
+        )
+        .unwrap();
+
+        assert_eq!(responder_verdict, Verdict::Accepted, "{}", result.reason);
+        assert_eq!(result.our_verdict, Verdict::Accepted);
+    }
+
+    /// One peer unscoped → backwards-compatible: skip the domain check.
+    #[test]
+    fn exchange_skips_domain_check_when_either_peer_unscoped() {
+        let alice = key_alice();
+        let bob = key_bob();
+        // Alice has the strict agri scope; Bob has none.
+        let registry = build_registry_with_domains(&alice, &bob, Some(agri_scope()), None);
+
+        let alice_attest = make_v1(&alice);
+        let bob_attest = make_v1(&bob);
+
+        let (_, responder_verdict) = perform_exchange(
+            &alice,
+            vec![],
+            alice_attest,
+            &bob,
+            vec![],
+            bob_attest,
+            &registry,
+        )
+        .unwrap();
+
+        assert_eq!(responder_verdict, Verdict::Accepted);
     }
 }

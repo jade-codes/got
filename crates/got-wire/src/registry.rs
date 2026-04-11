@@ -14,6 +14,7 @@ use crate::certificate::{
     certificate_fingerprint, is_revoked, is_valid_at, verify_certificate, AgentCertificate,
     CertificateRevocationList,
 };
+use crate::domain::{Domain, DomainPattern, DomainScope, InteractionMode, PermittedDomain};
 use crate::WireError;
 
 /// A trust registry mapping agent IDs to public keys and local policy.
@@ -57,6 +58,12 @@ pub struct AgentEntry {
     /// When present and the registry has CA keys, the certificate is validated
     /// on add and checked for expiry during exchange.
     pub certificate: Option<AgentCertificate>,
+    /// Optional domain scope (§4). When set on both peers, the exchange
+    /// runs the bidirectional compatibility check at Phase 0 — *before*
+    /// any cryptographic or geometric verification.  When `None`, the
+    /// agent is treated as domain-unscoped (PoC default, backwards
+    /// compatible).
+    pub domain_scope: Option<DomainScope>,
 }
 
 /// Compute the canonical agent ID for a public key.
@@ -206,6 +213,7 @@ impl TrustRegistry {
             roles: cert.roles.clone(),
             expected_model_hash: cert.expected_model_hash,
             certificate: Some(cert.clone()),
+            domain_scope: old_entry.domain_scope,
         };
 
         self.agents.insert(new_agent_id, new_entry);
@@ -279,6 +287,8 @@ impl TrustRegistry {
                     None => None,
                 };
 
+                let domain_scope = parse_domain_scope(&a)?;
+
                 registry.add_agent(AgentEntry {
                     name: a.id,
                     public_key: pk,
@@ -287,6 +297,7 @@ impl TrustRegistry {
                     roles: a.roles.unwrap_or_default(),
                     expected_model_hash,
                     certificate: None,
+                    domain_scope,
                 });
             }
         }
@@ -357,6 +368,62 @@ struct AgentToml {
     max_drift_accepted: Option<f32>,
     roles: Option<Vec<String>>,
     expected_model_hash: Option<String>,
+    primary_domain: Option<String>,
+    permitted_domains: Option<Vec<PermittedDomainToml>>,
+    exclusion_domains: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PermittedDomainToml {
+    pattern: String,
+    mode: InteractionMode,
+}
+
+fn parse_domain_scope(a: &AgentToml) -> Result<Option<DomainScope>, WireError> {
+    let primary = match a.primary_domain.as_ref() {
+        Some(p) => p,
+        None => {
+            // No primary declared: only valid if no permitted/exclusion lists either.
+            if a.permitted_domains.is_some() || a.exclusion_domains.is_some() {
+                return Err(WireError::RegistryParse(format!(
+                    "agent {}: permitted_domains/exclusion_domains require primary_domain",
+                    a.id
+                )));
+            }
+            return Ok(None);
+        }
+    };
+    let primary = Domain::parse(primary)
+        .map_err(|e| WireError::RegistryParse(format!("agent {}: primary_domain: {e}", a.id)))?;
+
+    let mut permitted = Vec::new();
+    if let Some(list) = &a.permitted_domains {
+        for entry in list {
+            let pattern = DomainPattern::parse(&entry.pattern).map_err(|e| {
+                WireError::RegistryParse(format!("agent {}: permitted_domains: {e}", a.id))
+            })?;
+            permitted.push(PermittedDomain {
+                pattern,
+                mode: entry.mode,
+            });
+        }
+    }
+
+    let mut exclusions = Vec::new();
+    if let Some(list) = &a.exclusion_domains {
+        for s in list {
+            let pat = DomainPattern::parse(s).map_err(|e| {
+                WireError::RegistryParse(format!("agent {}: exclusion_domains: {e}", a.id))
+            })?;
+            exclusions.push(pat);
+        }
+    }
+
+    Ok(Some(DomainScope {
+        primary,
+        permitted,
+        exclusions,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +541,49 @@ roles = ["verifier"]
     }
 
     #[test]
+    fn registry_toml_parses_domain_scope() {
+        let alice = test_key_alice();
+        let toml_str = format!(
+            r#"
+[[agents]]
+id = "alice"
+public_key = "{}"
+primary_domain = "agriculture.crop-management"
+exclusion_domains = ["transport.*"]
+permitted_domains = [
+    {{ pattern = "agriculture.*", mode = "cooperative" }},
+    {{ pattern = "meteorology.*", mode = "advisory" }},
+]
+"#,
+            pk_hex(&alice),
+        );
+
+        let reg = TrustRegistry::from_toml(&toml_str).unwrap();
+        let id = compute_agent_id(&alice.verifying_key());
+        let entry = reg.lookup(&id).unwrap();
+        let scope = entry.domain_scope.as_ref().expect("domain scope present");
+        assert_eq!(scope.primary.as_str(), "agriculture.crop-management");
+        assert_eq!(scope.permitted.len(), 2);
+        assert_eq!(scope.exclusions.len(), 1);
+    }
+
+    #[test]
+    fn registry_toml_rejects_permitted_without_primary() {
+        let alice = test_key_alice();
+        let toml_str = format!(
+            r#"
+[[agents]]
+id = "alice"
+public_key = "{}"
+permitted_domains = [{{ pattern = "agriculture.*", mode = "cooperative" }}]
+"#,
+            pk_hex(&alice),
+        );
+        let err = TrustRegistry::from_toml(&toml_str).unwrap_err();
+        assert!(matches!(err, WireError::RegistryParse(_)));
+    }
+
+    #[test]
     fn registry_bad_hex_rejected() {
         let toml_str = r#"
 [[agents]]
@@ -499,6 +609,7 @@ public_key = "ZZZZ"
             roles: vec!["producer".to_string()],
             expected_model_hash: None,
             certificate: None,
+            domain_scope: None,
         });
 
         assert!(registry.lookup(&id).is_some());
