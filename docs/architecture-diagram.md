@@ -99,6 +99,20 @@ graph TB
         FILE_STORE --> AUDIT
     end
 
+    subgraph network["Phase 4b — Network Transport (got-net)"]
+        TCP_TRANSPORT["TcpTransport<br/>(Noise NK over TCP)"]
+        NET_SERVER["Server<br/>serve() + spawn_blocking<br/>per-connection handler"]
+        NET_CLIENT["Client<br/>request_blocking / request<br/>Noise NK initiate"]
+        NET_CODEC["Codec<br/>32B agent_id + 200B envelope<br/>+ length-prefixed JSON"]
+        FED_SYNC["FederationSyncManager<br/>async polling loop<br/>RefreshPolicy + backoff"]
+        HTTP_SYNC["HttpSyncSource<br/>reqwest + ETag/304"]
+
+        NET_CLIENT --> TCP_TRANSPORT
+        NET_SERVER --> TCP_TRANSPORT
+        TCP_TRANSPORT --> NET_CODEC
+        FED_SYNC --> HTTP_SYNC
+    end
+
     subgraph exchange["Phase 5 — Agent-to-Agent Exchange (got-wire)"]
         direction TB
         ALICE["Agent Alice<br/>Model A, KeyPair A"]
@@ -147,6 +161,9 @@ graph TB
         DECIDE -->|no| REFUSE
     end
 
+    NET_CODEC --> FRAME
+    FED_SYNC --> REGISTRY
+
     style extraction fill:#1a1a2e,stroke:#e94560,color:#fff
     style geometry fill:#16213e,stroke:#0f3460,color:#fff
     style probes fill:#1a1a2e,stroke:#e94560,color:#fff
@@ -154,6 +171,7 @@ graph TB
     style causal fill:#0f3460,stroke:#53a8b6,color:#fff
     style enclave fill:#1a1a2e,stroke:#e94560,color:#fff
     style store fill:#16213e,stroke:#0f3460,color:#fff
+    style network fill:#2e1a2e,stroke:#b653a8,color:#fff
     subgraph proxy["Phase 6 — Proxy Architecture (got-proxy + got-web)"]
         direction TB
         USER["User (Browser)"]

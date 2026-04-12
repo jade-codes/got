@@ -3,7 +3,7 @@
 Dependency stack from core types up to agent orchestration.
 The top layer can be either the CLI (for human-operated setup) or
 an agent runtime (for autonomous agent-to-agent operation).
-Layers 0–4 are identical in both modes.
+Layers 0–5 are identical in both modes.
 
 The pipeline implements three **content-based** trust tiers. The tier
 an attestation belongs to is derived from which fields it populates —
@@ -36,13 +36,13 @@ All layers incorporate defence-in-depth measures hardened during the security au
 | S-21 | `model_hash` is `Option<[u8; 32]>` (no sentinel) | 0 |
 | N-1 | `Frame::encode()` returns `Result` + payload size guard | 3a |
 | N-2 | Mutex poison recovery in `CollectingHook` | 1 |
-| N-3 | Full `anyhow::Result` error propagation in CLI | 5 |
+| N-3 | Full `anyhow::Result` error propagation in CLI | 6 |
 
 ---
 
 ```
 +=======================================================================+
-|  Layer 5 — Orchestration                                              |
+|  Layer 6 — Orchestration                                              |
 |                                                                       |
 |  ┌──────────────────────────┐  ┌──────────────────────────────────┐  |
 |  │  CLI Mode (got-cli)      │  │  Agent Runtime Mode              │  |
@@ -67,6 +67,26 @@ All layers incorporate defence-in-depth measures hardened during the security au
 +=======|=======|=======|===========|=======|=======|=======|==========+
         |       |       |           |       |       |       |
         v       v       v           v       v       v       v
++=======================================================================+
+|  Layer 5 — Network Transport                 (got-net)               |
+|                                                                       |
+|  TcpTransport (got-wire::noise::Transport impl over real sockets)    |
+|                                                                       |
+|  Server:                             Client:                          |
+|    serve(addr, config)                 request(addr, params, reg)     |
+|    tokio listener + spawn_blocking     request_blocking (sync)        |
+|    per-connection Noise NK accept      Noise NK initiate → exchange   |
+|                                                                       |
+|  Codec:                              Federation Sync:                 |
+|    ExchangeRequest/Response            FederationSyncManager          |
+|    32B agent_id + 200B envelope        async polling loop             |
+|    + length-prefixed JSON attests      RefreshPolicy + exp. backoff   |
+|                                        HttpSyncSource (reqwest)       |
+|                                        If-None-Match / 304 support    |
+|                                                                       |
++=======================================================================+
+        |                              |
+        v                              v
 +=======================================================================+
 |  Layer 4 — Hardware Enclave                  (got-enclave)            |
 |                                                                       |
@@ -169,6 +189,23 @@ All layers incorporate defence-in-depth measures hardened during the security au
 |  Supervised request (§5.5):       |
 |    perform_supervised_request()   |
 |    → one-directional verdict      |
+|                                   |
+|  Federation (got-wire::federation)|
+|    Multi-hop voucher chains       |
+|      verify_vouchers_with_depth() |
+|      DEFAULT_MAX_VOUCHER_CHAIN_   |
+|        DEPTH = 10                 |
+|      fixed-point with snapshot-   |
+|        per-iteration              |
+|    OperatorKeyRotation            |
+|      cross-signed, temporal       |
+|      constraint (not_before)      |
+|    FederationRevocationList (FRL) |
+|      signed fingerprint list      |
+|      only in-chain FRLs honoured  |
+|    FederationSyncSource trait     |
+|      StaticSyncSource             |
+|      FileSyncSource               |
 +===================================+
         |
         v
@@ -401,6 +438,11 @@ Network exchange layer. Depends on got-core and got-attest:
 - **`GovernanceThresholds`** (`got-wire::governance`) — per-domain `max_drift`, `min_confidence`, `min_causal_score`, `require_chain`, `require_causal_validation`. `GovernanceTable` keyed by `DomainPattern` with most-specific lookup. `effective_thresholds()` falls back to `permissive(entry.max_drift_accepted)` when no domain-specific policy matches (§7.3 / §8.2).
 - **`perform_supervised_request()`** — one-directional exchange helper (§5.5): a regulator demands an attestation from a supervised agent without producing one of its own. Requires `InteractionMode::Supervised` on both sides of the domain scope.
 - **`check_attestation_scope_binding()`** — §2.1 cross-check: if the incoming attestation carries a `DomainScopeDeclaration`, it must match the registry's entry for the same agent. Catches relay attacks and misconfigured agents.
+- **Federation** (`got-wire::federation`):
+  - Multi-hop voucher chains — `verify_vouchers_with_depth()` walks transitive A→B→C chains with a fixed-point algorithm (snapshot-per-iteration) up to `DEFAULT_MAX_VOUCHER_CHAIN_DEPTH` (10).
+  - `OperatorKeyRotation` — cross-signed rotation record binding old key to new key with a temporal constraint (`not_before`).
+  - `FederationRevocationList` (FRL) — signed list of revoked voucher fingerprints; only FRLs from in-chain operators are honoured.
+  - `FederationSyncSource` trait + `StaticSyncSource` (in-memory) + `FileSyncSource` (disk-based) for providing registry snapshots to the sync layer.
 
 ### Layer 3b — Attestation Store (`got-store`)
 
@@ -421,7 +463,18 @@ Hardware isolation layer. Depends on got-core, got-probe, got-attest, got-wire:
 - **`HardwareCapture`** trait / **`MockDmaTap`** — GPU DMA / TEE copy-out
 - **`enclave_pipeline()`** — capture → receive → causal_check → attest_with_causal
 
-### Layer 5a — Proxy Architecture (`got-proxy`)
+### Layer 5 — Network Transport (`got-net`)
+
+Concrete TCP transport with Noise NK encryption over real sockets:
+
+- **`TcpTransport`** — implements `got-wire::noise::Transport` over `TcpStream`; 16 MiB receive guard.
+- **Server** — `serve(addr, config)` runs an async tokio listener; each accepted connection is dispatched to a sync handler via `spawn_blocking` that performs Noise NK handshake, receives `ExchangeRequest`, runs `validate_request`, and sends a signed `ExchangeResponse`.
+- **Client** — `request_blocking(addr, params, registry)` connects, performs Noise NK initiation, sends request, receives response (sync). `request(addr, params, registry)` wraps this in an async `spawn_blocking` call.
+- **Codec** — `encode_exchange_request` / `decode_exchange_request` (and Response variants): 32-byte `agent_id` + 200-byte `ExchangeEnvelope` + length-prefixed JSON for attestation chains.
+- **`FederationSyncManager`** — async polling loop that periodically fetches remote federation registry snapshots. Configurable `RefreshPolicy` with exponential backoff on failure and staleness detection.
+- **`HttpSyncSource`** — implements `FederationSyncSource` using `reqwest::blocking` with `If-None-Match` / HTTP 304 support for bandwidth-efficient polling.
+
+### Layer 6a — Proxy Architecture (`got-proxy`)
 
 Behavioral value monitoring for closed-source models (Tier 0 trust):
 
@@ -439,7 +492,7 @@ Behavioral value monitoring for closed-source models (Tier 0 trust):
 - **`ValueSpaceStore`** trait — `MemoryValueSpaceStore` + `FileValueSpaceStore`
 - **`ProxyConfig`** — all thresholds, weights, EWMA alpha, minimum observations
 
-### Layer 5b — Orchestration
+### Layer 6b — Orchestration
 
 **CLI Mode (`got-cli`)**: keygen, train, attest, verify, checkpoint, drift,
 coherence, collapse-report, compare — all return `anyhow::Result<()>` (N-3).

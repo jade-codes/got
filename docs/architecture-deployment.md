@@ -54,12 +54,22 @@ MockEnclave simulates the enclave API but runs in the same process.
 │  │  Rust Process (got-cli or agent runtime)                       │ │
 │  │                                                                │ │
 │  │  ┌──────────────────────────────────────────────────────────┐  │ │
-│  │  │  Layer 5: CLI / Agent Runtime                            │  │ │
+│  │  │  Layer 6: CLI / Agent Runtime                            │  │ │
 │  │  │    - Parses .gotact, .gotue, .gotgeo binary files        │  │ │
 │  │  │    - Orchestrates the full pipeline                      │  │ │
 │  │  │    - Manages keypair lifecycle (zeroize on drop)         │  │ │
 │  │  │    - Drives exchanges with peer agents                   │  │ │
 │  │  │    N-3: All CLI commands return anyhow::Result<()>       │  │ │
+│  │  └──────────────┬───────────────────────────────────────────┘  │ │
+│  │                 │                                              │ │
+│  │  ┌──────────────v───────────────────────────────────────────┐  │ │
+│  │  │  Layer 5: Network Transport (got-net)                    │  │ │
+│  │  │    - TcpTransport (Noise NK over TCP sockets)            │  │ │
+│  │  │    - Server: tokio listener + spawn_blocking handler     │  │ │
+│  │  │    - Client: request_blocking / async request            │  │ │
+│  │  │    - Codec: 32B agent_id + 200B envelope + JSON          │  │ │
+│  │  │    - FederationSyncManager: async polling + backoff      │  │ │
+│  │  │    - HttpSyncSource: reqwest + ETag/304                  │  │ │
 │  │  └──────────────┬───────────────────────────────────────────┘  │ │
 │  │                 │                                              │ │
 │  │  ┌──────────────v───────────────────────────────────────────┐  │ │
@@ -143,7 +153,7 @@ MockEnclave simulates the enclave API but runs in the same process.
 | Gap | Why it matters | What fixes it |
 |-----|---------------|---------------|
 | No hardware isolation | Agent can read signing key + probes | Real TEE (step 12) |
-| No network transport | Exchanges are in-memory | TCP/TLS transport over wire framing |
+| No TLS wrapper | got-net uses Noise NK; regulatory deployments may need TLS-on-the-outside | Wrap `TcpStream` in `rustls` before `TcpTransport::new` |
 | No remote attestation | Can't prove the enclave is genuine hardware | Intel IAS/DCAP or AMD SEV cert chain |
 | No probe provisioning channel | Probes loaded from local file | Secure channel from governance body to enclave |
 | Model forward pass is external | `model_fn` closure called from agent process | Model inference inside confidential compute |

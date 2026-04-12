@@ -570,23 +570,90 @@ Failures emit `VoucherWarning` variants:
 | `UnknownIssuer` | `issuer_id` does not correspond to any higher-priority member's `operator_key`. |
 | `NoDigestPin` | A non-lead member's `digest` is `None`, so vouchers cannot bind to it. |
 
-### Vouching limitations
+### Multi-hop voucher chains
 
-The scoped vouching layer is **one-hop** and **structural**. It
-does not provide:
+The federation layer now supports transitive vouching: if A vouches
+for B and B vouches for C, the verifier resolves "A transitively
+vouches C" up to a configurable depth.
 
-- **Multi-hop chains.** A vouches B, B vouches C — the verifier
-  does not aggregate this into "A transitively vouches C". Each
-  member must carry a voucher from a higher-priority neighbour.
-- **Voucher revocation lists.** The only revocation mechanism is
-  expiry. Set short `not_after` deadlines and re-issue.
-- **Operator key rotation.** Operators are pinned by the verifying
-  key in `NamedRegistry::operator_key`. Rotating an operator key
-  requires rebuilding the federation file with the new key and
-  re-issuing every voucher signed by the old key.
-- **Async sync between authorities.** Vouchers are static artefacts
-  loaded with the federation file; live sync would need a separate
-  fetch protocol.
+- **`verify_vouchers_with_depth(now, max_depth)`** — walks the
+  voucher graph using a fixed-point algorithm with a snapshot per
+  iteration. Each round marks newly-reachable members as vouched
+  until no new members are added or `max_depth` is reached.
+- **`DEFAULT_MAX_VOUCHER_CHAIN_DEPTH`** = 10. Override via the
+  `max_depth` parameter. Shallow depths (2–3) are recommended for
+  production to limit transitive trust radius.
+- The single-hop `verify_vouchers(now)` still works and is
+  equivalent to `verify_vouchers_with_depth(now, 1)`.
+
+### Operator key rotation
+
+Operator keys are no longer permanently pinned. The
+`OperatorKeyRotation` record lets an operator rotate their signing
+key without rebuilding the entire federation file:
+
+- **`add_key_rotation(rotation)`** — installs a cross-signed
+  rotation record. Both the old and new keys must sign the rotation
+  payload for it to be accepted.
+- **Temporal constraint** — each rotation carries a `not_before`
+  timestamp; rotations that claim to take effect in the future are
+  rejected at verification time. This prevents an attacker who
+  compromises the old key from pre-dating a rotation.
+- After rotation, vouchers signed by the old key remain valid for
+  their remaining lifetime; new vouchers must be signed with the
+  new key.
+
+### Federation revocation list (FRL)
+
+Vouchers can now be explicitly revoked before their expiry via a
+`FederationRevocationList`:
+
+- **`add_frl(frl)`** — loads a signed list of revoked voucher
+  fingerprints into the federation. The FRL must be signed by an
+  operator whose key is in the current voucher chain (in-chain
+  FRLs only — an outside party cannot revoke vouchers).
+- **`voucher_fingerprint()`** — each `FederationVoucher` exposes a
+  deterministic fingerprint (SHA-256 of its canonical fields) that
+  the FRL references.
+- FRLs are checked during `verify_vouchers_with_depth()`: any
+  voucher whose fingerprint appears in a loaded FRL is treated as
+  expired.
+
+### Federation sync (`FederationSyncManager` + `HttpSyncSource`)
+
+For live deployments where federation registries change
+independently, the sync layer provides automatic refresh:
+
+- **`FederationSyncManager`** (`got-net::federation_sync`) — an
+  async polling loop that periodically fetches remote registry
+  snapshots from one or more `FederationSyncSource` endpoints.
+  Configurable `RefreshPolicy` controls the polling interval.
+  On fetch failure, exponential backoff prevents thundering-herd
+  retries. Staleness detection flags sources that have not changed
+  beyond a configurable threshold.
+- **`HttpSyncSource`** (`got-net::http_sync`) — a concrete sync
+  source using `reqwest::blocking`. Sends `If-None-Match` with the
+  previous ETag; on HTTP 304, the existing snapshot is reused
+  without re-parsing or re-hashing. This makes frequent polling
+  bandwidth-efficient.
+- **`FederationSyncSource` trait** (`got-wire::federation`) — the
+  abstract interface. `StaticSyncSource` (in-memory bytes) and
+  `FileSyncSource` (reads from a path on each call) are provided
+  for testing and single-machine deployments.
+
+### Previous vouching limitations (updated status)
+
+The scoped vouching layer previously had four limitations. Current
+status:
+
+- **Multi-hop chains.** Now supported via
+  `verify_vouchers_with_depth()` (see above).
+- **Voucher revocation lists.** Now supported via
+  `FederationRevocationList` (see above).
+- **Operator key rotation.** Now supported via
+  `OperatorKeyRotation` (see above).
+- **Async sync between authorities.** Now supported via
+  `FederationSyncManager` + `HttpSyncSource` (see above).
 
 ### When to use federation
 

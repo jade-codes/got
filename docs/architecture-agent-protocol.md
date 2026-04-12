@@ -793,6 +793,11 @@ The wire protocol uses length-prefixed binary framing, implemented in
 | Query attestations | `store.query(&filter)` / `store.chain(model_id)` | `got-store` | — |
 | Audit model | `store.audit(model_id)` | `got-store` | — |
 | Drift measurement | `CausalGeometry::drift_from(&reference)` | `got-core::geometry` | — |
+| Federation sync manager | `FederationSyncManager::new(sources, policy)` | `got-net::federation_sync` | Async polling + exponential backoff |
+| HTTP federation sync | `HttpSyncSource` (reqwest + If-None-Match/304) | `got-net::http_sync` | Bandwidth-efficient polling |
+| Multi-hop voucher verification | `verify_vouchers_with_depth(now, max_depth)` | `got-wire::federation` | Fixed-point, DEFAULT_MAX_VOUCHER_CHAIN_DEPTH=10 |
+| Operator key rotation | `add_key_rotation(rotation)` | `got-wire::federation` | Cross-signed, temporal constraint |
+| Federation revocation list | `add_frl(frl)` / `voucher_fingerprint()` | `got-wire::federation` | Signed fingerprint list, in-chain only |
 | Distribution shift | `detect_distribution_shift(baseline, current, σ)` | `got-probe::hooks` | N-2 |
 
 ---
