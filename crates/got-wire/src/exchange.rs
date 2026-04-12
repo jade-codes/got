@@ -165,6 +165,57 @@ pub fn build_response(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 1 — Domain compatibility pre-flight
+// ---------------------------------------------------------------------------
+
+/// Phase 1 pre-flight: check domain compatibility between two agents
+/// **before** either side computes attestations.
+///
+/// This is the primary structural gate described in Protocol §4 /
+/// Appendix B.  It runs *before* any expensive work (geometry
+/// computation, probe evaluation, causal intervention, attestation
+/// signing) and short-circuits the exchange if the two agents are
+/// domain-incompatible.  The existing domain check inside
+/// `validate_request` / `validate_response` remains as defence in
+/// depth (Phase 4, step 2) — a re-verification against the
+/// attestation's own scope declaration.
+///
+/// Returns `Ok(())` if the two agents are compatible (or if either
+/// side is unscoped, which is the backwards-compatible fallthrough).
+/// Returns `Err(WireError)` with a domain-specific error variant if
+/// structurally incompatible.
+///
+/// Typical call sites:
+///   - `got-net::client::request_on_stream` — called after looking up
+///     the peer in the registry, before `build_request`.
+///   - `got-net::server::handle_connection` — called after reading the
+///     initiator's `agent_id` from the first frame, before computing
+///     the server's own attestation.
+pub fn check_domain_before_exchange(
+    own_agent_id: &[u8; 32],
+    peer_agent_id: &[u8; 32],
+    registry: &TrustRegistry,
+) -> Result<(), WireError> {
+    let own_entry = match registry.lookup(own_agent_id) {
+        Some(e) => e,
+        None => return Ok(()), // unscoped self: skip
+    };
+    let peer_entry = match registry.lookup(peer_agent_id) {
+        Some(e) => e,
+        None => return Ok(()), // unknown peer: let validate_request catch it later
+    };
+    match (
+        own_entry.domain_scope.as_ref(),
+        peer_entry.domain_scope.as_ref(),
+    ) {
+        (Some(own_scope), Some(peer_scope)) => {
+            check_domain_compatibility(own_scope, peer_scope)
+        }
+        _ => Ok(()), // either side unscoped: backwards compatible
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Validation helpers
 // ---------------------------------------------------------------------------
 
@@ -360,11 +411,14 @@ pub fn validate_request(
         ));
     }
 
-    // 1c. Phase 0 — domain compatibility (§4 / Appendix B).
-    //     If both peers have a declared domain scope, the bidirectional
-    //     compatibility check runs *before* any cryptographic or geometric
-    //     verification.  Domain incompatibility is structural and cannot be
-    //     overridden by high probe readings or governance dispensation.
+    // 1c. Phase 4 defence in depth — domain compatibility re-verify.
+    //     The primary domain check happens in Phase 1 (before attestation
+    //     computation) via check_domain_before_exchange().  This re-check
+    //     catches the unlikely case where the registry changed between
+    //     Phase 1 and Phase 4, and serves as a structural safety net in
+    //     case the caller skipped the pre-flight (e.g. in-memory tests
+    //     that call validate_request directly without going through
+    //     got-net).
     if let Some(self_entry) = registry.lookup(own_agent_id) {
         if let (Some(peer_scope), Some(self_scope)) =
             (entry.domain_scope.as_ref(), self_entry.domain_scope.as_ref())
@@ -528,7 +582,8 @@ pub fn validate_response(
         ));
     }
 
-    // 1c. Phase 0 — domain compatibility (§4 / Appendix B).
+    // 1c. Phase 4 defence in depth — domain compatibility re-verify
+    //     (see the matching comment in validate_request above).
     if let Some(self_entry) = registry.lookup(own_agent_id) {
         if let (Some(peer_scope), Some(self_scope)) =
             (entry.domain_scope.as_ref(), self_entry.domain_scope.as_ref())
@@ -727,8 +782,9 @@ pub fn perform_exchange(
 ///   1. Supervised agent builds a normal ExchangeRequest carrying its
 ///      current attestation, chain, and a freshly-generated nonce.
 ///   2. The regulator runs `validate_request` against its local trust
-///      registry — this applies Phase 0 domain compat, envelope, chain,
-///      and governance checks exactly as in a symmetric exchange.
+///      registry — this applies the Phase 1 domain pre-flight (via the
+///      defence-in-depth re-check), envelope, chain, and governance
+///      checks exactly as in a symmetric exchange.
 ///   3. The regulator emits a verdict; no counter-attestation is sent.
 ///
 /// For the domain compatibility check to succeed, both agents must
@@ -1218,10 +1274,12 @@ mod tests {
         }
     }
 
-    /// Use case §5.1: agri ↔ vehicle exchange must be rejected at Phase 0,
-    /// before envelope/attestation/chain verification.
+    /// Use case §5.1: agri ↔ vehicle exchange must be rejected at Phase 1
+    /// (domain pre-flight).  The defence-in-depth re-check in Phase 4
+    /// also catches this, which is what this test exercises via
+    /// `perform_exchange` (which calls `validate_request` directly).
     #[test]
-    fn exchange_rejected_by_domain_phase_0() {
+    fn exchange_rejected_by_domain_incompatibility() {
         let alice = key_alice();
         let bob = key_bob();
         let registry =
@@ -1342,7 +1400,7 @@ mod tests {
     }
 
     /// Without Supervised permission on either side, the one-directional
-    /// request must still be rejected at Phase 0.
+    /// request must still be rejected at Phase 1 (domain pre-flight).
     #[test]
     fn supervised_request_rejected_without_supervised_mode() {
         let regulator = SigningKey::from_bytes(&[0xCC; 32]);

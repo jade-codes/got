@@ -19,6 +19,7 @@ use got_attest::assemble_and_sign;
 use got_core::{GeometricAttestation, InnerProduct, Precision, SCHEMA_VERSION};
 use got_net::client::{request, RequestParams};
 use got_net::server::{accept_loop, AttestationProvider, ServerConfig, StaticAttestationProvider};
+use got_wire::domain::{Domain, DomainPattern, DomainScope, InteractionMode, PermittedDomain};
 use got_wire::exchange::Verdict;
 use got_wire::governance::GovernanceTable;
 use got_wire::registry::{compute_agent_id, AgentEntry, TrustRegistry};
@@ -242,5 +243,163 @@ async fn multiple_sequential_exchanges() {
         assert_eq!(outcome.verdict, Verdict::Accepted, "iteration {i}: {}", outcome.reason);
     }
 
+    server_task.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Test 4 — Phase 1 domain pre-flight: the client aborts BEFORE
+// computing attestations when domain scopes are incompatible.
+// ---------------------------------------------------------------------------
+
+fn scoped_registry(
+    alice: &SigningKey,
+    bob: &SigningKey,
+    alice_domain: &str,
+    alice_permitted: &str,
+    bob_domain: &str,
+    bob_permitted: &str,
+) -> TrustRegistry {
+    let mut r = TrustRegistry::empty();
+    let alice_pk = alice.verifying_key();
+    let bob_pk = bob.verifying_key();
+
+    let scope = |primary: &str, permitted: &str| DomainScope {
+        primary: Domain::parse(primary).unwrap(),
+        permitted: vec![PermittedDomain {
+            pattern: DomainPattern::parse(permitted).unwrap(),
+            mode: InteractionMode::Cooperative,
+        }],
+        exclusions: vec![],
+    };
+
+    r.add_agent(AgentEntry {
+        name: "alice".into(),
+        public_key: alice_pk,
+        agent_id: compute_agent_id(&alice_pk),
+        max_drift_accepted: 0.05,
+        roles: vec![],
+        expected_model_hash: None,
+        certificate: None,
+        domain_scope: Some(scope(alice_domain, alice_permitted)),
+        governance_table: GovernanceTable::default(),
+    });
+    r.add_agent(AgentEntry {
+        name: "bob".into(),
+        public_key: bob_pk,
+        agent_id: compute_agent_id(&bob_pk),
+        max_drift_accepted: 0.05,
+        roles: vec![],
+        expected_model_hash: None,
+        certificate: None,
+        domain_scope: Some(scope(bob_domain, bob_permitted)),
+        governance_table: GovernanceTable::default(),
+    });
+    r
+}
+
+#[tokio::test]
+async fn phase_1_domain_preflight_rejects_incompatible() {
+    let alice = key(0xAA); // agriculture
+    let bob = key(0xBB);   // transport
+
+    let registry = Arc::new(scoped_registry(
+        &alice,
+        &bob,
+        "agriculture.crop-management",
+        "agriculture.*",
+        "transport.autonomous-vehicle",
+        "transport.*",
+    ));
+    let bob_attest = make_attest(&bob, "bob-model");
+    let server_config = ServerConfig {
+        signing_key: Arc::new(bob.clone()),
+        registry: registry.clone(),
+        attestation: Arc::new(StaticAttestationProvider {
+            current: bob_attest,
+            chain: vec![],
+        }) as Arc<dyn AttestationProvider>,
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(accept_loop(listener, server_config));
+
+    let alice_attest = make_attest(&alice, "alice-model");
+    let result = request(
+        addr,
+        RequestParams {
+            signing_key: alice.clone(),
+            responder_vk: bob.verifying_key(),
+            chain: vec![],
+            current: alice_attest,
+        },
+        (*registry).clone(),
+    )
+    .await;
+
+    // The client's Phase 1 pre-flight rejects before sending.
+    match result {
+        Err(e) => {
+            let msg = format!("{e}");
+            assert!(
+                msg.contains("domain") || msg.contains("Domain"),
+                "expected domain rejection, got: {msg}"
+            );
+        }
+        Ok(outcome) => {
+            assert_ne!(outcome.verdict, Verdict::Accepted);
+            assert!(
+                outcome.reason.contains("domain") || outcome.reason.contains("Domain"),
+                "expected domain rejection, got: {}",
+                outcome.reason
+            );
+        }
+    }
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn phase_1_compatible_domains_succeed() {
+    let alice = key(0xAA);
+    let bob = key(0xBB);
+
+    let registry = Arc::new(scoped_registry(
+        &alice,
+        &bob,
+        "agriculture.crop-management",
+        "agriculture.*",
+        "agriculture.supply-chain",
+        "agriculture.*",
+    ));
+    let bob_attest = make_attest(&bob, "bob-model");
+    let server_config = ServerConfig {
+        signing_key: Arc::new(bob.clone()),
+        registry: registry.clone(),
+        attestation: Arc::new(StaticAttestationProvider {
+            current: bob_attest,
+            chain: vec![],
+        }) as Arc<dyn AttestationProvider>,
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(accept_loop(listener, server_config));
+
+    let alice_attest = make_attest(&alice, "alice-model");
+    let outcome = request(
+        addr,
+        RequestParams {
+            signing_key: alice.clone(),
+            responder_vk: bob.verifying_key(),
+            chain: vec![],
+            current: alice_attest,
+        },
+        (*registry).clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.verdict, Verdict::Accepted, "{}", outcome.reason);
     server_task.abort();
 }

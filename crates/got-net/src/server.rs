@@ -28,7 +28,9 @@ use std::sync::Arc;
 use ed25519_dalek::SigningKey;
 
 use got_core::GeometricAttestation;
-use got_wire::exchange::{build_response, validate_request, Verdict};
+use got_wire::exchange::{
+    build_response, check_domain_before_exchange, validate_request, Verdict,
+};
 use got_wire::noise::{noise_accept_ed25519, NoiseSession};
 use got_wire::registry::{compute_agent_id, TrustRegistry};
 
@@ -119,22 +121,52 @@ pub async fn accept_loop(
 /// own thread pool (or no pool at all) can skip [`accept_loop`] and
 /// invoke this directly on each accepted stream.
 pub fn handle_connection(stream: TcpStream, config: &ServerConfig) -> Result<(), NetError> {
+    // Phase 0: Noise NK accept — authenticates the responder's static
+    // key to the initiator.  The initiator is anonymous at this point.
     let transport = TcpTransport::new(stream);
     let mut session: NoiseSession<TcpTransport> =
         noise_accept_ed25519(transport, &config.signing_key)?;
 
-    // 1. Receive and decode the request.
+    // Receive and decode the request so we know the initiator's agent_id.
     let req_bytes = session.recv_encrypted()?;
     let request = decode_exchange_request(&req_bytes)?;
 
-    // 2. Run the standard validation.  The verifier's own agent ID is
-    //    derived from its signing key — that's the ID the initiator
-    //    will have used to address the envelope.
     let own_agent_id = compute_agent_id(&config.signing_key.verifying_key());
+
+    // Phase 1: domain compatibility pre-flight.  Runs BEFORE the
+    // server computes its own attestation (which is expensive: Φ,
+    // probes, causal intervention, signing).  If the initiator's
+    // domain is structurally incompatible, reject immediately
+    // without wasting compute.
+    if let Err(e) = check_domain_before_exchange(
+        &own_agent_id,
+        &request.agent_id,
+        &config.registry,
+    ) {
+        // Build a Rejected response so the initiator sees a clean
+        // verdict rather than a raw connection close.
+        let (current, chain) = config.attestation.current();
+        let response = build_response(
+            request.envelope.nonce,
+            request.agent_id,
+            &config.signing_key,
+            Verdict::Rejected,
+            chain,
+            current,
+            format!("Phase 1 domain pre-flight failed: {e}"),
+        )?;
+        let rsp_bytes = encode_exchange_response(&response)?;
+        session.send_encrypted(&rsp_bytes)?;
+        return Ok(());
+    }
+
+    // Phase 4: full validation (envelope sig, attestation sig,
+    // domain re-check as defence in depth, governance, scope
+    // binding, chain verification).
     let (verdict, reason) =
         validate_request(&request, &own_agent_id, None, &config.registry)?;
 
-    // 3. Build the response, signed with our own key.
+    // Build the response, signed with our own key.
     let (current, chain) = config.attestation.current();
     let response = build_response(
         request.envelope.nonce,
@@ -146,12 +178,12 @@ pub fn handle_connection(stream: TcpStream, config: &ServerConfig) -> Result<(),
         reason,
     )?;
 
-    // 4. Encode and send.
+    // Encode and send.
     let rsp_bytes = encode_exchange_response(&response)?;
     session.send_encrypted(&rsp_bytes)?;
 
-    // The socket is dropped here — TCP FIN flushes the underlying
-    // stream and closes the connection.
+    // Phase 5: decide — the initiator reads the verdict from the
+    // response and decides cooperate/refuse.  The socket closes here.
     Ok(())
 }
 

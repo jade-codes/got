@@ -22,7 +22,9 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::RngCore;
 
 use got_core::GeometricAttestation;
-use got_wire::exchange::{build_request, validate_response, ExchangeResponse, Verdict};
+use got_wire::exchange::{
+    build_request, check_domain_before_exchange, validate_response, ExchangeResponse, Verdict,
+};
 use got_wire::noise::{noise_connect_ed25519, NoiseSession};
 use got_wire::registry::{compute_agent_id, TrustRegistry};
 
@@ -80,13 +82,24 @@ pub fn request_on_stream(
         current,
     } = params;
 
-    // 1. Wrap the stream and run Noise NK as initiator.
+    // Phase 0: TCP connect + Noise NK handshake (already done by caller
+    // for request_on_stream; request_blocking does both).
     let transport = TcpTransport::new(stream);
     let mut session: NoiseSession<TcpTransport> =
         noise_connect_ed25519(transport, &responder_vk)?;
 
-    // 2. Build the signed exchange request, addressed to the responder.
+    // Phase 1: domain compatibility pre-flight.  Runs BEFORE any
+    // attestation work (geometry, probes, signing).  If the two agents
+    // are domain-incompatible, the connection closes immediately
+    // without wasting compute.
+    let initiator_id = compute_agent_id(&signing_key.verifying_key());
     let responder_id = compute_agent_id(&responder_vk);
+    check_domain_before_exchange(&initiator_id, &responder_id, registry)?;
+
+    // Phase 2 (self-attest) is the caller's responsibility — they
+    // pass in the already-signed `current` attestation.
+
+    // Phase 3: build and send the exchange request.
     let mut nonce = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let request = build_request(nonce, responder_id, &signing_key, chain, current)?;
@@ -99,11 +112,10 @@ pub fn request_on_stream(
     let rsp_bytes = session.recv_encrypted()?;
     let response = decode_exchange_response(&rsp_bytes)?;
 
-    // 5. Validate the response against our local registry.  This re-runs
-    //    Phase 0 / governance / attestation-binding checks against what
-    //    the server actually sent — we don't trust the server's verdict
-    //    blindly.
-    let initiator_id = compute_agent_id(&signing_key.verifying_key());
+    // Phase 4: validate the response against our local registry.
+    //    Re-runs domain compat (defence in depth), envelope, attestation,
+    //    governance, and scope-binding checks — we don't trust the
+    //    server's verdict blindly.
     let (our_verdict, our_reason) =
         validate_response(&response, &initiator_id, &nonce, registry)?;
 
