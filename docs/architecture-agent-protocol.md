@@ -67,9 +67,23 @@ The exchange protocol is implemented in `got-wire::exchange`:
        |                          |                        |
        |   ---- PHASE 2: Self-Attest (parallel) ----      |
        |                          |                        |
-       |-- compute Φ_A from U_A  |   compute Φ_B from U_B--|
-       |-- run probes on Φ_A     |      run probes on Φ_B--|
-       |-- optional causal_check |  optional causal_check --|
+       |  Two-tier cost model:    |   Two-tier cost model:  |
+       |                          |                        |
+       |  2a. Load cached invariants from ModelContext     |
+       |      (or recompute if stale/invalidated):         |
+       |-- Φ_A from ModelContext  |   Φ_B from ModelContext--|
+       |-- probe weights (cached) |  probe weights (cached)--|
+       |-- causal scores (cached) |  causal scores (cached)--|
+       |-- geometry_hash, drift   |  geometry_hash, drift   --|
+       |   Invalidation triggers: |  Invalidation triggers:  |
+       |     startup, model update|    startup, model update |
+       |     distribution shift,  |    distribution shift,   |
+       |     manual operator      |    manual operator       |
+       |                          |                        |
+       |  2b. Per-input pipeline (fresh, NEVER cached):    |
+       |-- forward pass → h_A    |   forward pass → h_B   --|
+       |-- read_probe()*per layer |  read_probe()*per layer--|
+       |   → readings, conf, flags|  → readings, conf, flags|
        |-- sign(attest_A, sk_A)  |    sign(attest_B, sk_B)--|
        |   assemble_and_sign()   |    assemble_and_sign()   |
        |   S-7/S-13/S-20 gates   |    S-7/S-13/S-20 gates  |
@@ -812,6 +826,7 @@ The wire protocol uses length-prefixed binary framing, implemented in
 | Operator key rotation | `add_key_rotation(rotation)` | `got-wire::federation` | Cross-signed, temporal constraint |
 | Federation revocation list | `add_frl(frl)` / `voucher_fingerprint()` | `got-wire::federation` | Signed fingerprint list, in-chain only |
 | Distribution shift | `detect_distribution_shift(baseline, current, σ)` | `got-probe::hooks` | N-2 |
+| Model invariant cache | `ModelContext::new()` / `get()` / `update()` / `invalidate()` | `got-net::attestation_cache` | RwLock, two-tier cost model |
 
 ---
 

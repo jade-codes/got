@@ -90,7 +90,7 @@ All flows reflect the security-hardened codebase (353 tests passing).
                               probes.json (persisted)
                                          |
   =====================================================
-   SELF-ATTESTATION                      |
+   SELF-ATTESTATION (Two-Tier Cost Model)            |
   =====================================================
                                          |
   Why: The attestation is a signed, deterministic record of what
@@ -101,43 +101,65 @@ All flows reflect the security-hardened codebase (353 tests passing).
     Tier 2 = `parent_attestation_hash.is_some()` (chained)
     Tier 3 = non-empty `causal_scores` with every record causal
 
+  KEY INSIGHT: Probe readings depend on input activations, so
+  signed attestations CANNOT be cached. What CAN be cached are
+  the expensive model invariants that only change on model update.
+  This separation is enforced by ModelContext (got-net::attestation_cache).
+
   Hardening (defence-in-depth):
     S-7:  timestamp must be ≤ now + 300 s
     S-13: model_id, corpus_version, probe_version ≤ 256 bytes
     S-20: layer_readings ≤ 1024 layers, total readings ≤ 65536
     S-21: model_hash is Option<[u8; 32]> (None if absent)
-                                         |
-   load_activations(.gotact) ----+       |
-   current CausalGeometry ----+  |       |
-                              |  |       |
-                              v  v       |
-                     CausalGeometry      |
-                              |          |
-        probes.json ----------+----------+
+
+  ------- TIER 1: Cached Invariants (ModelContext) -------
+  |                                                      |
+  |  Loaded from ModelContext::get() if ready,           |
+  |  otherwise recomputed and stored via update().       |
+  |  Invalidated on: startup, model update,              |
+  |    detect_distribution_shift(), manual trigger.       |
+  |                                                      |
+  |  CausalGeometry Phi = U^T U       O(Vd^2) to compute|
+  |    geometry_hash: H(Phi) [u8;32]                     |
+  |                                                      |
+  |  Trained probe weights             SGD under causal  |
+  |    bound to geometry_hash          inner product     |
+  |    probes.json (persisted)                           |
+  |                                                      |
+  |  If model updated (chained):                         |
+  |    load reference .gotgeo -> Geometry_ref            |
+  |    drift = drift_from(current, ref)                  |
+  |    if drift > max_drift: invalidate + retrain        |
+  |    parent_attestation_hash = H(prev)                 |
+  |    geometry_drift = drift                            |
+  |                                                      |
+  |  Causal validation results         model forward     |
+  |    causal_check per probe          passes (expensive)|
+  |    causal_scores: [...]                              |
+  |                                                      |
+  |  All stored in CachedInvariants:                     |
+  |    { geometry, probe_weights, causal_scores,          |
+  |      geometry_hash, parent_attestation_hash,         |
+  |      geometry_drift, computed_at, model_id,          |
+  |      model_hash }                                    |
+  --------------------------------------------------------
                               |
                               v
-   If the model has updated (chained attestation):
-     load reference .gotgeo ----> Geometry_ref
-     drift = drift_from(current, ref)
-     if drift > max_drift: STOP (probes stale)
-     read_probe_checked(probe, set, h, current, ref)
-   Else (fresh / anchor):
-     read_probe(probe, h, geometry)
-                              |
-                              v
+  ------- TIER 2: Per-Attestation (Fresh Every Time) -----
+  |                                                      |
+  |  These depend on input context — NEVER cached.       |
+  |                                                      |
+   load_activations(.gotact) ----+
+   current CausalGeometry ----+  |  (from ModelContext)
+   probe_weights ----------+  |  |  (from ModelContext)
+                           |  |  |
+                           v  v  v
               For each probe in each layer:
                 raw  = inner_product(w, h) + bias
                 conf = sigma(platt_scale * raw + platt_shift)
                 flag = conf < threshold
                               |
-                              v
-   Optional causal checks (Tier 3):
-     For each probe:
-       causal_check(probe, h, geometry, delta, model_fn, threshold)
-         h+ = h + delta*w_c,   h- = h - delta*w_c
-         y+ = model(h+),   y- = model(h-)
-         delta_plus, delta_minus, consistency
-         -> CausalScore { ..., is_causal }
+                              | (read_probe / read_probe_checked)
                               |
                               v
         merkle_root() -----+  |  +------ sha256(act_bytes)
@@ -146,10 +168,10 @@ All flows reflect the security-hardened codebase (353 tests passing).
               Fill GeometricAttestation struct
               { schema_version: SCHEMA_VERSION,   (always 1)
                 model_hash: Option<[u8; 32]>,    ← S-21
-                parent_attestation_hash: None or H(prev),
-                geometry_hash: H(Phi),
-                geometry_drift: None or Some(drift),
-                causal_scores: [...],            (Tier 3 only)
+                parent_attestation_hash,         ← from ModelContext
+                geometry_hash: H(Phi),           ← from ModelContext
+                geometry_drift,                  ← from ModelContext
+                causal_scores: [...],            ← from ModelContext
                 intervention_delta: Some(delta),
                 causal_flag: Some(all_pass),
                 sequence_number,                  ← Phase 13
@@ -157,7 +179,8 @@ All flows reflect the security-hardened codebase (353 tests passing).
                 probe_commitment: Some(H(...)),   ← Phase 13
                 density_reading / curvature_reading (manifold),
                 domain_scope_declaration (§2.1 binding),
-                readings, confidences, flags, ... }
+                layer_readings, confidence,       ← FRESH (never cached)
+                coverage_flags, ... }             ← FRESH (never cached)
                               |
                               v
               assemble_and_sign(attestation, sk)
@@ -168,6 +191,8 @@ All flows reflect the security-hardened codebase (353 tests passing).
                               v
               Signed GeometricAttestation
               (held in memory / persisted / stored)
+              (NEVER cached — each signing is unique to input)
+  --------------------------------------------------------
 
 
   =====================================================

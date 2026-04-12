@@ -44,6 +44,11 @@ layer adds one guarantee on top of the layers below it.
 │    32B agent_id + 200B envelope    HttpSyncSource:                     │
 │    + length-prefixed JSON attests    reqwest::blocking + ETag/304      │
 │                                                                        │
+│  ModelContext (attestation_cache):   CachedInvariants:                 │
+│    new/get/update/invalidate           geometry, probe_weights,        │
+│    is_ready/computed_at                causal_scores, geometry_hash,   │
+│    RwLock (read-heavy, write-rare)     parent_hash, drift, model_id   │
+│                                                                        │
 └────────┬──────────────────────────────┬────────────────────────────────┘
          │                              │
          v                              v
@@ -258,7 +263,7 @@ layer adds one guarantee on top of the layers below it.
 | `got-store` | lib | Attestation persistence (`AttestationStore` trait), `MemoryStore` (in-memory), `FileStore` (on-disk JSON with atomic writes + hash-on-load), content-addressed storage (`StoreId`), filtering (`StoreFilter`), audit reporting (`AuditReport`, `DriftSummary`, `CausalSummary`) |
 | `got-incoherence` | lib | Zero-training coherence analysis: `causal_cosine()`, `analyse()`, `EmbeddingSource` trait, `PrecomputedEmbeddings`, `UnembeddingLookup`, contradiction/redundancy detection |
 | `got-proxy` | lib | Proxy architecture for closed-source models: `BehavioralValueSpace` (Welford + EWMA), `ProxySession`, 3-signal `detect_deviation()`, `BehavioralAttestation` (schema "B1", Ed25519), `ValueSpaceStore` trait (memory + file) |
-| `got-net` | lib | Concrete TCP transport with Noise NK encryption (`TcpTransport` impl of `got-wire::noise::Transport`), async server (`serve()` with tokio + `spawn_blocking` per connection), sync/async client (`request_blocking` / `request`), wire codec (`ExchangeRequest`/`Response` encode/decode), `FederationSyncManager` (async polling loop with `RefreshPolicy`, exponential backoff, staleness detection), `HttpSyncSource` (`reqwest::blocking` with `If-None-Match`/304) |
+| `got-net` | lib | Concrete TCP transport with Noise NK encryption (`TcpTransport` impl of `got-wire::noise::Transport`), async server (`serve()` with tokio + `spawn_blocking` per connection), sync/async client (`request_blocking` / `request`), wire codec (`ExchangeRequest`/`Response` encode/decode), `FederationSyncManager` (async polling loop with `RefreshPolicy`, exponential backoff, staleness detection), `HttpSyncSource` (`reqwest::blocking` with `If-None-Match`/304), `ModelContext` (two-tier attestation lifecycle: caches expensive model invariants in `CachedInvariants` via `RwLock`, invalidated on model update / distribution shift / startup; per-attestation work -- forward pass, `read_probe()`, `assemble_and_sign()` -- runs fresh every time and is NEVER cached) |
 | `got-cli` | bin | CLI with `keygen`, `train`, `attest`, `verify`, `checkpoint`, `drift` subcommands — all return `anyhow::Result<()>` (N-3); binary `.gotact`/`.gotue`/`.gotgeo` parsers |
 | `got-web` | bin | Axum web server: unified D3.js frontend, LLM chat relay (Ollama/OpenAI/Anthropic via `reqwest`), text embedding, proxy session management, coherence analysis; static files via `ServeDir` |
 

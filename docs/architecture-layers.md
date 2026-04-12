@@ -84,6 +84,18 @@ All layers incorporate defence-in-depth measures hardened during the security au
 |                                        HttpSyncSource (reqwest)       |
 |                                        If-None-Match / 304 support    |
 |                                                                       |
+|  ModelContext (attestation_cache):                                    |
+|    Two-tier cost model for attestation lifecycle:                     |
+|    CACHED (expensive, changes on model update only):                 |
+|      CausalGeometry Phi, trained probe weights,                      |
+|      causal validation results, geometry_hash,                       |
+|      parent_attestation_hash, geometry_drift                         |
+|    PER-ATTESTATION (depends on input context, NEVER cached):         |
+|      forward pass -> activations -> read_probe() -> sign             |
+|    Invalidation: startup / model update / distribution shift /       |
+|      manual operator trigger                                         |
+|    RwLock for thread safety (read-heavy, write-rare)                 |
+|                                                                       |
 +=======================================================================+
         |                              |
         v                              v
@@ -283,6 +295,7 @@ All layers incorporate defence-in-depth measures hardened during the security au
 |    optional causal_check per reading                                  |
 |    set_parent_hash() for chaining                                     |
 |    coverage tracking across windows                                   |
+|    can trigger ModelContext::invalidate() on distribution shift       |
 |                                                                       |
 +=======================================================================+
         |
@@ -404,7 +417,7 @@ Machine learning and causal analysis layer. Depends on Layer 0 geometry:
 - **`causal_check_multi_layer(...)`** — multi-layer causal check with cross-layer consistency
 - **`CausalScore`** — 5-field result (delta_plus, delta_minus, consistency, is_causal, perturbation_delta)
 - **`MeasurementSidecar`** — windowed runtime measurement: samples probes, runs optional causal checks,
-  produces signed attestations at window boundaries
+  produces signed attestations at window boundaries. Can trigger `ModelContext::invalidate()` when `detect_distribution_shift()` fires, forcing recomputation of cached invariants (geometry, probes, causal scores).
 - **`CollectingHook`** — thread-safe activation buffer (N-2: recovers from mutex poisoning)
 - **`ActivationStats`** — Welford online mean/variance for activation monitoring
 - **`detect_distribution_shift(...)`** — z-score-based fraction of shifted dimensions
@@ -473,6 +486,12 @@ Concrete TCP transport with Noise NK encryption over real sockets:
 - **Codec** — `encode_exchange_request` / `decode_exchange_request` (and Response variants): 32-byte `agent_id` + 200-byte `ExchangeEnvelope` + length-prefixed JSON for attestation chains.
 - **`FederationSyncManager`** — async polling loop that periodically fetches remote federation registry snapshots. Configurable `RefreshPolicy` with exponential backoff on failure and staleness detection.
 - **`HttpSyncSource`** — implements `FederationSyncSource` using `reqwest::blocking` with `If-None-Match` / HTTP 304 support for bandwidth-efficient polling.
+- **`ModelContext`** (`attestation_cache`) — separates the attestation lifecycle into two cost tiers. Probe readings depend on input activations, so signed attestations cannot be cached. What CAN be cached are the expensive invariants that only change on model update:
+  - **Cached in `CachedInvariants`** (expensive, recomputed on model update): `CausalGeometry` Phi = UᵀU (O(Vd²)), trained probe weights (SGD under causal IP, bound to `geometry_hash`), causal validation results (model forward passes for `causal_check`), `geometry_hash`, `parent_attestation_hash`, `geometry_drift`, `model_id`, `model_hash`, `computed_at` timestamp.
+  - **Computed fresh per attestation** (depends on input context, NEVER cached): forward pass to get activations, `read_probe()` per probe x layer producing `layer_readings` / `confidence` / `coverage_flags`, then `assemble_and_sign()` to produce the signed `GeometricAttestation`.
+  - **API**: `new()`, `with_invariants()`, `get()` -> `Option<CachedInvariants>`, `update()`, `invalidate()`, `is_ready()`, `computed_at()`.
+  - **Invalidation triggers**: (1) agent startup, (2) model update (new U -> recompute Phi, retrain probes, re-run causal checks), (3) `detect_distribution_shift()` fires (probe staleness) -- MeasurementSidecar can trigger `ModelContext::invalidate()`, (4) manual operator trigger.
+  - **Thread safety**: uses `RwLock` (read-heavy, write-rare pattern). Does NOT implement `AttestationProvider` -- the old `AttestationCache` which cached signed attestations was architecturally wrong because readings depend on input context.
 
 ### Layer 6a — Proxy Architecture (`got-proxy`)
 
