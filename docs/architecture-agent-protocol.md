@@ -46,18 +46,26 @@ The exchange protocol is implemented in `got-wire::exchange`:
   Agent Alice                  Channel               Agent Bob
   (Model A, KeyPair A)                                (Model B, KeyPair B)
        |                          |                        |
-       |   ---- PHASE 0: Domain Compatibility (local) ---- |
+       |   ---- PHASE 0: Initiation ----                    |
        |                          |                        |
-       |  registry.lookup(id_B)   |    registry.lookup(id_A)|
-       |  check_domain_           |    check_domain_       |
-       |    compatibility(        |      compatibility(    |
-       |      scope_A, scope_B)   |        scope_B, scope_A)|
+       |  TCP connect, Noise NK   |                        |
+       |  handshake, encrypted    |                        |
+       |  channel established.    |                        |
+       |  Alice is anonymous      |                        |
+       |  until Phase 4.          |                        |
+       |                          |                        |
+       |   ---- PHASE 1: Domain Compatibility (pre-flight) |
+       |                          |                        |
+       |  check_domain_before_    |    check_domain_before_|
+       |    exchange(own_id,      |      exchange(own_id,  |
+       |      peer_id, registry)  |        peer_id, registry)|
        |  Exclusion / permission /|    Exclusion / perm /  |
        |  mode intersection.      |    mode intersection.  |
        |  FAIL → abort early      |    FAIL → reject       |
        |  (no crypto, no probes)  |    (Verdict::Rejected) |
+       |  Unscoped peers skip.    |    Unscoped peers skip.|
        |                          |                        |
-       |   ---- PHASE 1: Self-Attest (parallel) ----      |
+       |   ---- PHASE 2: Self-Attest (parallel) ----      |
        |                          |                        |
        |-- compute Φ_A from U_A  |   compute Φ_B from U_B--|
        |-- run probes on Φ_A     |      run probes on Φ_B--|
@@ -67,7 +75,7 @@ The exchange protocol is implemented in `got-wire::exchange`:
        |   S-7/S-13/S-20 gates   |    S-7/S-13/S-20 gates  |
        |   (or enclave_pipeline) |   (or enclave_pipeline)  |
        |                          |                        |
-       |   ---- PHASE 2: Exchange ----                     |
+       |   ---- PHASE 3: Exchange ----                     |
        |                          |                        |
        |-- build_request(         |                        |
        |     nonce, id_B, sk_A,   |                        |
@@ -99,7 +107,7 @@ The exchange protocol is implemented in `got-wire::exchange`:
        |                          |                        |
        |   receive response <-----|<--- send response      |
        |                          |                        |
-       |   ---- PHASE 3: Verify ----                       |
+       |   ---- PHASE 4: Verify ----                       |
        |                          |                        |
        |-- validate_response(     |                        |
        |     rsp, id_A,           |                        |
@@ -120,7 +128,7 @@ The exchange protocol is implemented in `got-wire::exchange`:
        |       ↑ S-8: rotation   |        ↑ S-8: rotation |
        |     -> ChainVerdict      |      -> ChainVerdict   |
        |                          |                        |
-       |   ---- PHASE 4: Decide ----                       |
+       |   ---- PHASE 5: Decide ----                       |
        |                          |                        |
        |   Both Accepted?         |           Both Accepted?|
        |     yes -> cooperate     |    cooperate <- yes    |
@@ -349,7 +357,7 @@ derived from the public key, never manually assigned.
 
 ## 5b. Domain Scoping (Implemented — Protocol §4 / Appendix B)
 
-The `got-wire::domain` module implements the structural Phase 0 layer
+The `got-wire::domain` module implements the structural Phase 1 layer
 specified in §4 of the protocol companion paper. Each `AgentEntry` may
 carry an optional `DomainScope` declaring the agent's primary domain
 of competence, the patterns it is permitted to interact with, and an
@@ -413,9 +421,10 @@ beats any wildcard, and a longer wildcard prefix beats a shorter one.
 
 ### Wired into the exchange
 
-`validate_request` and `validate_response` run the check at "Phase 0"
-— immediately after the sender lookup and certificate validation, and
-before envelope verification:
+`validate_request` and `validate_response` run the domain re-check as
+"Phase 4 defence in depth" — a re-verify of the Phase 1 pre-flight
+gate. The Phase 1 gate itself (`check_domain_before_exchange`) runs
+earlier, before any attestation computation:
 
 ```rust
 if let Some(self_entry) = registry.lookup(own_agent_id) {
@@ -460,7 +469,7 @@ permitted_domains = [
 
 | Pair | Result | Failure / mode |
 |---|---|---|
-| §5.1 agriculture.crop-management ↔ transport.autonomous-vehicle | **Rejected at Phase 0** | `DomainExcluded` (also `DomainNotPermitted` without the exclusion) |
+| §5.1 agriculture.crop-management ↔ transport.autonomous-vehicle | **Rejected at Phase 1** | `DomainExcluded` (also `DomainNotPermitted` without the exclusion) |
 | §5.2 healthcare.diagnostic-advisory ↔ healthcare.drug-interaction | Accepted | Asymmetric: `Advisory` ↔ `ReadOnly` |
 | §5.3 supply-chain peers within `agriculture.*` | Accepted | `Cooperative` ↔ `Cooperative` |
 | §5.5 finance.regulatory-compliance ↔ finance.trading | Accepted (one-way) | `Supervised` ↔ `Supervised` via `perform_supervised_request` |
@@ -469,8 +478,9 @@ permitted_domains = [
 
 ## 5c. Per-Domain Governance Thresholds (Implemented — Protocol §7.3 / §8.2)
 
-Domain compatibility (§5b) decides *whether* two agents are allowed to
-exchange at all.  Governance thresholds decide *how strictly* the verifier
+Domain compatibility (§5b, Phase 1 pre-flight) decides *whether* two
+agents are allowed to exchange at all.  Governance thresholds decide
+*how strictly* the verifier
 holds the peer's attestation to quantitative bounds once the exchange is
 allowed.  The two layers are orthogonal: §4 is structural, §7.3/§8.2 is
 quantitative policy.
@@ -559,7 +569,8 @@ compatibility, so the exchange is one-directional by construction.
 and `Cooperative` in the domain-scope machinery.  When both sides
 declare the other's primary domain in `Supervised` mode, the Phase 0
 compatibility check passes; the paired `(Supervised, Supervised)` mode
-is the only asymmetry the paper requires.
+is the only asymmetry the paper requires.  The Phase 1 pre-flight
+(`check_domain_before_exchange`) passes for supervised pairs.
 
 The helper that drives this flow is `perform_supervised_request`:
 
@@ -575,8 +586,9 @@ The helper that drives this flow is `perform_supervised_request`:
 
 The supervised agent signs a normal envelope + attestation and sends
 it; the regulator runs `validate_request` exactly as in a symmetric
-exchange (Phase 0 domain check, envelope verify, attestation sig,
-chain, governance thresholds, attestation-registry scope binding).
+exchange (Phase 1 domain pre-flight, Phase 4 envelope verify,
+attestation sig, chain, governance thresholds, attestation-registry
+scope binding).
 No response attestation is produced — the flow returns a bare verdict.
 
 ---
@@ -703,9 +715,9 @@ summary. This avoids O(n²) pairwise verification:
 | NaN/Inf in fields | `AttestationError::NaN` or `Infinity` | Reject, corrupt data |
 | Integrity violation | `IntegrityViolation { layer, pos }` | Reject, hardware capture tampered |
 | Registry integrity fail | `RegistryIntegrity { expected, actual }` | Reject, registry file tampered (S-2) |
-| Domain excluded | `DomainExcluded { excluder, target }` | Reject at Phase 0, structural — cannot be overridden |
-| Domain not permitted | `DomainNotPermitted { from, target }` | Reject at Phase 0, peer outside declared scope |
-| Modes incompatible | `DomainModeIncompatible { a, b }` | Reject at Phase 0, both peers ReadOnly |
+| Domain excluded | `DomainExcluded { excluder, target }` | Reject at Phase 1, structural — cannot be overridden |
+| Domain not permitted | `DomainNotPermitted { from, target }` | Reject at Phase 1, peer outside declared scope |
+| Modes incompatible | `DomainModeIncompatible { a, b }` | Reject at Phase 1, both peers ReadOnly |
 | Domain parse error | `DomainParse(String)` | Reject registry load (malformed domain or pattern) |
 | Chain required but missing | reason: "chain required for domain …" | §8.2 `require_chain`, Tier 2+ mandate |
 | Causal validation required but missing | reason: "causal validation required for domain …" | §8.2 `require_causal_validation`, Tier 3 mandate |
@@ -768,8 +780,9 @@ The wire protocol uses length-prefixed binary framing, implemented in
 | Causal check | `causal_check(probe, h, geom, δ, model_fn, thresh)` | `got-probe::intervention` | — |
 | Build exchange request | `build_request(nonce, peer_id, sk, chain, current)` | `got-wire::exchange` | — |
 | Build exchange response | `build_response(nonce, peer_id, sk, verdict, ...)` | `got-wire::exchange` | — |
-| Validate request | `validate_request(req, own_id, nonce, registry)` | `got-wire::exchange` | S-2, §4 Phase 0, §7.3/§8.2, §2.1 |
-| Validate response | `validate_response(rsp, own_id, nonce, registry)` | `got-wire::exchange` | S-2, §4 Phase 0, §7.3/§8.2, §2.1 |
+| Phase 1 domain pre-flight | `check_domain_before_exchange(own_id, peer_id, registry)` | `got-wire::exchange` | §4 Phase 1 pre-flight gate |
+| Validate request | `validate_request(req, own_id, nonce, registry)` | `got-wire::exchange` | S-2, §4 Phase 4 defence-in-depth re-verify, §7.3/§8.2, §2.1 |
+| Validate response | `validate_response(rsp, own_id, nonce, registry)` | `got-wire::exchange` | S-2, §4 Phase 4 defence-in-depth re-verify, §7.3/§8.2, §2.1 |
 | Domain compatibility check | `check_domain_compatibility(scope_a, scope_b)` | `got-wire::domain` | §4 / Appendix B |
 | Effective governance thresholds | `effective_thresholds(self_entry, peer)` | `got-wire::exchange` | §7.3 / §8.2 |
 | Enforce governance policy | `enforce_governance(peer, attestation, thresholds)` | `got-wire::exchange` | §7.3 / §8.2 |

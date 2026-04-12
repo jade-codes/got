@@ -283,12 +283,12 @@ cooperating. This is the fundamental agent-to-agent protocol.
   Agent Alice                   Channel                Agent Bob
   (Model A, sk_A)                                      (Model B, sk_B)
        |                           |                        |
-       |=== PHASE 1: Self-Attest (parallel) ===            |
+       |=== PHASE 2: Self-Attest (parallel) ===            |
        |                           |                        |
        |-- build Φ_A, run probes  |   build Φ_B, run probes --|
        |-- sign(attest_A, sk_A)   |     sign(attest_B, sk_B) ---|
        |                           |                        |
-       |=== PHASE 2: Exchange ===  |                        |
+       |=== PHASE 3: Exchange ===  |                        |
        |                           |                        |
        |-- build_request(          |                        |
        |     nonce, id_B,          |                        |
@@ -304,7 +304,8 @@ cooperating. This is the fundamental agent-to-agent protocol.
        |                           |     None, registry) ---|
        |                           |   (S-2: registry       |
        |                           |    integrity verified)  |
-       |                           |   §4 Phase 0:          |
+       |                           |   §4 Phase 4 (defence   |
+       |                           |   in depth re-verify): |
        |                           |     check_domain_      |
        |                           |     compatibility(     |
        |                           |       peer, self)      |
@@ -327,7 +328,7 @@ cooperating. This is the fundamental agent-to-agent protocol.
        |                           |                        |
        |   receive rsp <-----------|<------ ExchangeResponse|
        |                           |                        |
-       |=== PHASE 3: Verify ===   |                        |
+       |=== PHASE 4: Verify ===   |                        |
        |                           |                        |
        |-- validate_response(      |                        |
        |     rsp, id_A,            |                        |
@@ -347,7 +348,7 @@ cooperating. This is the fundamental agent-to-agent protocol.
        |       &[pk_B], max_drift) |       &[pk_A], max_drift)|
        |       ↑ S-8: key rotation |       ↑ S-8: key rotation|
        |                           |                        |
-       |=== PHASE 4: Decide ===   |                        |
+       |=== PHASE 5: Decide ===   |                        |
        |                           |                        |
        |   Both Accepted?          |          Both Accepted? |
        |     yes → cooperate       |   cooperate ← yes      |

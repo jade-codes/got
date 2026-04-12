@@ -113,7 +113,7 @@ graph TB
         FED_SYNC --> HTTP_SYNC
     end
 
-    subgraph exchange["Phase 5 — Agent-to-Agent Exchange (got-wire)"]
+    subgraph exchange["Phases 3–5 — Agent-to-Agent Exchange (got-wire)"]
         direction TB
         ALICE["Agent Alice<br/>Model A, KeyPair A"]
         BOB["Agent Bob<br/>Model B, KeyPair B"]
@@ -125,7 +125,7 @@ graph TB
             ENV_FIELDS["nonce [32B] ‖ peer_agent_id [32B]<br/>‖ attestation_hash [32B]<br/>‖ chain_root [32B] ‖ timestamp [8B]<br/>+ Ed25519 sig [64B]<br/>S-9: verified flag"]
         end
 
-        DOMAIN_CHECK["Phase 0:<br/>check_domain_compatibility()<br/>(§4 / Appendix B)<br/>exclusions ✓ | bidirectional<br/>permission ✓ | mode<br/>intersection ✓<br/>Supervised pair OK (§5.5)<br/>STRUCTURAL — runs first"]
+        DOMAIN_CHECK["Phase 1 pre-flight:<br/>check_domain_before_exchange()<br/>(§4 / Appendix B)<br/>exclusions ✓ | bidirectional<br/>permission ✓ | mode<br/>intersection ✓<br/>Supervised pair OK (§5.5)<br/>STRUCTURAL — runs before<br/>attestation computation<br/><br/>Phase 4 defence in depth:<br/>check_domain_compatibility()<br/>re-verify in validate_request/<br/>validate_response"]
 
         GOVERNANCE["§7.3 / §8.2:<br/>effective_thresholds(self, peer)<br/>enforce_governance()<br/>→ max_drift, min_confidence,<br/>require_chain (Tier 2+),<br/>require_causal_validation<br/>(Tier 3)"]
 

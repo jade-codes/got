@@ -291,7 +291,7 @@ All flows reflect the security-hardened codebase (353 tests passing).
            rsp, id_A, nonce,              req, id_B, nonce,
            registry)                      registry)
                 |                                |
-   Phase 0 — Domain check:          Phase 0 — Domain check:
+   Phase 4 — Domain re-verify (defence in depth):          Phase 4 — Domain re-verify (defence in depth):
      check_domain_                    check_domain_
        compatibility(                   compatibility(
          peer_scope,                      peer_scope,
