@@ -36,8 +36,12 @@
 pub mod client;
 pub mod codec;
 pub mod error;
+pub mod federation_sync;
+pub mod http_sync;
 pub mod server;
 pub mod transport;
 
 pub use error::NetError;
+pub use federation_sync::{FederationSyncManager, RefreshPolicy, SyncStatus};
+pub use http_sync::HttpSyncSource;
 pub use transport::{TcpTransport, MAX_MESSAGE_SIZE};

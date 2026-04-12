@@ -9,9 +9,11 @@ got-attest = { path = "../got-attest" }
 got-wire = { path = "../got-wire" }
 ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 serde_json = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
