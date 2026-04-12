@@ -33,6 +33,7 @@
 // thread is the simplest correct answer.
 // ---------------------------------------------------------------------------
 
+pub mod attestation_cache;
 pub mod client;
 pub mod codec;
 pub mod error;
@@ -41,6 +42,7 @@ pub mod http_sync;
 pub mod server;
 pub mod transport;
 
+pub use attestation_cache::{CachedInvariants, ModelContext, ProbeEntry};
 pub use error::NetError;
 pub use federation_sync::{FederationSyncManager, RefreshPolicy, SyncStatus};
 pub use http_sync::HttpSyncSource;
